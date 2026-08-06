@@ -2,7 +2,7 @@
 
 ## Locked decisions
 
-- Zero budget. Everything runs on free tiers: GitHub Actions (cron collector), GitHub Releases (bulk data), GitHub Pages (reports).
+- Near-zero budget. Compute runs free on GitHub Actions (cron collector) and GitHub Pages (reports). Storage is S3 with an accepted budget of $1-5/month and a design that keeps actual cost around $0.15-0.30/month; growth is capped by construction (see M1).
 - Collector runs on GitHub Actions cron. Scheduling jitter (runs delayed by minutes, occasionally skipped) is accepted; features must tolerate irregular snapshot spacing.
 - Trades are executed manually in game. The tool only advises. The commerce API is read-only, so this is also the only option.
 - Python for collector, features, and report. R is an option later for seasonal modeling (M4).
@@ -21,7 +21,14 @@ GitHub Actions specifics to handle:
 
 - Cron jitter: stamp every snapshot with the actual fetch time; never assume fixed intervals.
 - Scheduled workflows are disabled after 60 days without repo activity. The collector's own commits count as activity, so this self-solves while it runs; add a health check anyway.
-- Storage: raw snapshots would grow the repo by tens of MB/day. Decide in M1 between (a) delta-encoded snapshots (store only changed prices) committed to a dedicated data branch with periodic compaction, (b) GitHub Releases as blob storage for compacted parquet/csv.gz batches, or (c) both: deltas in git short-term, compacted batches promoted to Releases.
+Storage (decided): S3, private bucket `gw2-advisor-data-petrcala` in us-east-1.
+
+- `raw/YYYY/MM/DD/HHMMSS.json.gz`: delta snapshots (changed prices only), lifecycle-expired after 30 days, bounding the prefix at roughly 1GB
+- `state/latest.json.gz`: full price table, overwritten each run, used for diffing
+- `compact/YYYY-MM-DD.parquet`: daily compaction of raw deltas, the durable store, ~6GB/year
+- S3 has no native byte quota, so the cap is by construction: the workflow role is the only writer, and the collector refuses any upload that would push the bucket past 25GB (~$0.60/month) or any single object past 64MB
+- Public access fully blocked, so there is no public-egress cost vector; our own Actions reads sit inside the 100GB/month free egress tier
+- Auth via GitHub OIDC (no long-lived keys); the role can touch only this bucket, trust is limited to this repo's main branch. Setup in `infra/setup_aws.py`
 
 ### M2: backfill + flip scorer v1 + report
 
