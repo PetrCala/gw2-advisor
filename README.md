@@ -26,7 +26,7 @@ python -m report.build --local
 
 ## Status
 
-M2 (collector live, daily flip report). See [docs/ROADMAP.md](docs/ROADMAP.md) and the issue tracker.
+M3 (depth-aware daily flip report). See [docs/ROADMAP.md](docs/ROADMAP.md) and the issue tracker.
 
 ## Compliance
 

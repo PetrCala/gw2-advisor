@@ -48,12 +48,13 @@ Flip scorer v1 (assumptions are constants in `scorers/flip.py`):
 
 Report (report.yml, daily 04:10 UTC after compaction, dispatchable on demand): GitHub Pages, top 50 by EV/day, sortable table plus data.csv/data.json. Speculative seasonal picks arrive with M4. (Ran hourly briefly on 2026-08-06, reverted to daily.)
 
-### M3: depth + competition features
+### M3: depth + competition features (done)
 
-- `/v2/commerce/listings` order-book depth for shortlisted items.
-- Undercut/outbid frequency per item; filter out penny-war items.
-- Depth-aware pricing (price into book gaps, not best plus 1c).
-- Realized-exit pricing by walking the book.
+- `gw2api.fetch_listings` pulls order books for the ~200-item v1 shortlist (one request per 200 ids).
+- Depth-aware pricing (`features/book.py`): instead of best +-1c, prices walk into book gaps, accepting at most 0.25 days of queue ahead of us at the item's flow; the queue wait counts against the round-trip budget.
+- Exit floor: worst-case loss per unit from dumping the whole lot into the current buy book, shown as Exit % in the report.
+- Undercut/outbid rates (`features/reprice.py`): per-item 1-2c best-price moves per day, counted from our own delta snapshots (compact/ parquet plus today's raw). Items above 150 combined reprices/day are dropped as penny wars. Needs delta history in S3, so the columns stay empty in `--local` builds.
+- Deferred: feeding per-item reprice rates back into the capture assumption (waits for a few weeks of delta history).
 
 ### M4: seasonality + event calendar
 

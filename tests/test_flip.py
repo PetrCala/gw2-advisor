@@ -70,3 +70,38 @@ def test_score_all_ranks_by_ev_day():
     ranked = flip.score_all([a, b])
     assert [s["id"] for s in ranked] == [2, 1]
     assert ranked[0]["ev_day"] > ranked[1]["ev_day"]
+
+
+BOOK = {
+    "buys": [[1000, 100], [990, 50], [980, 5000]],
+    "sells": [[1400, 100], [1410, 50], [1420, 5000]],
+}
+
+
+def test_rescore_prices_into_gaps():
+    pick = flip.score_item(dict(BASE))
+    r = flip.rescore(pick, BOOK, (5.0, 5.0))
+    # 1000/day flow with 0.25-day budget tolerates 250 queued: past the
+    # 100 and the 50 on each side, into the gap above/below the 5000 wall.
+    assert r["buy_at"] == 981
+    assert r["sell_at"] == 1419
+    assert r["outbid_day"] == 5.0
+    assert r["round_trip_days"] <= flip.MAX_ROUND_TRIP_DAYS + 1e-9
+    assert r["exit_pct"] < 0  # dumping into the buy book always loses
+
+
+def test_rescore_drops_penny_wars():
+    pick = flip.score_item(dict(BASE))
+    assert flip.rescore(pick, BOOK, (100.0, 100.0)) is None
+
+
+def test_rescore_without_rates_keeps_item():
+    pick = flip.score_item(dict(BASE))
+    r = flip.rescore(pick, BOOK, None)
+    assert r is not None
+    assert r["outbid_day"] is None
+
+
+def test_rescore_empty_book_side_drops_item():
+    pick = flip.score_item(dict(BASE))
+    assert flip.rescore(pick, {"buys": [], "sells": BOOK["sells"]}, None) is None

@@ -11,6 +11,7 @@ import time
 import requests
 
 PRICES_URL = "https://api.guildwars2.com/v2/commerce/prices"
+LISTINGS_URL = "https://api.guildwars2.com/v2/commerce/listings"
 PAGE_SIZE = 200
 RETRIES = 3
 
@@ -37,6 +38,26 @@ def fetch_all_prices(session=None):
                 r["sells"]["quantity"],
             ]
     return items
+
+
+def fetch_listings(item_ids, session=None):
+    """Return {item_id: {"buys": [[price, qty], ...], "sells": [[price, qty], ...]}}.
+
+    buys come sorted best (highest) first, sells best (lowest) first, as the
+    API returns them. Items without any listings are absent from the result.
+    """
+    s = session or requests.Session()
+    books = {}
+    ids = list(item_ids)
+    for i in range(0, len(ids), PAGE_SIZE):
+        chunk = ids[i : i + PAGE_SIZE]
+        rows = _get_json(s, LISTINGS_URL, params={"ids": ",".join(map(str, chunk))})
+        for r in rows:
+            books[r["id"]] = {
+                "buys": [[lv["unit_price"], lv["quantity"]] for lv in r.get("buys", [])],
+                "sells": [[lv["unit_price"], lv["quantity"]] for lv in r.get("sells", [])],
+            }
+    return books
 
 
 def _get_json(s, url, params=None):

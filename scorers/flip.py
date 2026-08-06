@@ -19,6 +19,8 @@ Inputs are datawars2 snapshot rows, optionally with buy_price, sell_price,
 buy_quantity, sell_quantity overwritten from our own fresher collector state.
 """
 
+from features import book
+
 TAX = 0.15
 CAPTURE = 0.25
 MAX_ROUND_TRIP_DAYS = 2.0
@@ -26,6 +28,11 @@ CAPITAL_PER_ITEM = 1_000_000  # 100 gold, in copper
 MIN_MARGIN_PCT = 0.05
 MIN_FLOW = 24.0  # units/day on both sides (7d average); one an hour
 TOP_N = 50
+
+# M3 depth pass over the v1 shortlist.
+SHORTLIST_N = 200
+WAIT_TOLERANCE_DAYS = 0.25  # queue we accept ahead of us when pricing into a gap
+PENNY_WAR_PER_DAY = 150.0  # combined outbid+undercut rate that kills an item
 
 
 def score_item(it):
@@ -93,8 +100,70 @@ def confidence(it):
     return ("low", "low", "medium", "high")[checks]
 
 
-def score_all(items):
-    """Score every snapshot row, return the top TOP_N by EV/day."""
+def score_all(items, top_n=TOP_N):
+    """Score every snapshot row, return the top top_n by EV/day."""
     scored = [s for s in (score_item(it) for it in items) if s]
     scored.sort(key=lambda s: s["ev_day"], reverse=True)
-    return scored[:TOP_N]
+    return scored[:top_n]
+
+
+def rescore(pick, item_book, rates):
+    """Depth-aware second pass over a v1 pick; None when the book kills it.
+
+    Replaces best+-1c with prices walked into book gaps under the wait
+    budget, adds the queue wait to the round trip, drops penny-war items
+    (rates = (outbids/day, undercuts/day) or None when we lack delta
+    history), and marks the instant-exit floor from dumping the lot into
+    the buy book.
+    """
+    buys, sells = item_book.get("buys"), item_book.get("sells")
+    if not buys or not sells:
+        return None
+
+    if rates is not None:
+        outbid, undercut = rates
+        if outbid + undercut > PENNY_WAR_PER_DAY:
+            return None
+    else:
+        outbid = undercut = None
+
+    buy_flow, sell_flow = pick["buy_flow"], pick["sell_flow"]
+    buy_at = book.choose_buy_price(buys, buy_flow, WAIT_TOLERANCE_DAYS)
+    sell_at = book.choose_sell_price(sells, sell_flow, WAIT_TOLERANCE_DAYS)
+    if not buy_at or not sell_at:
+        return None
+
+    margin = int((sell_at - 1) * (1 - TAX)) - buy_at
+    if margin <= 0 or margin / buy_at < MIN_MARGIN_PCT:
+        return None
+
+    wait_days = book.queue_ahead(buys, buy_at, "buy") / buy_flow + book.queue_ahead(
+        sells, sell_at, "sell"
+    ) / sell_flow
+    fill_days_per_unit = 1 / (CAPTURE * buy_flow) + 1 / (CAPTURE * sell_flow)
+    budget = MAX_ROUND_TRIP_DAYS - wait_days
+    if budget <= 0:
+        return None
+    qty = int(min(budget / fill_days_per_unit, CAPITAL_PER_ITEM // buy_at))
+    if qty < 1:
+        return None
+    rt_days = wait_days + qty * fill_days_per_unit
+
+    dump_net = book.dump_value(buys, qty) * (1 - TAX)
+    exit_pct = (dump_net / qty - buy_at) / buy_at
+
+    out = dict(pick)
+    out.update(
+        buy_at=buy_at,
+        sell_at=sell_at,
+        margin=margin,
+        margin_pct=margin / buy_at,
+        qty=qty,
+        capital=qty * buy_at,
+        round_trip_days=rt_days,
+        ev_day=margin * qty / rt_days,
+        outbid_day=None if outbid is None else round(outbid, 1),
+        undercut_day=None if undercut is None else round(undercut, 1),
+        exit_pct=exit_pct,
+    )
+    return out
