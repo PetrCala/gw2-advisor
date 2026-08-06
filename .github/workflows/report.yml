@@ -44,7 +44,8 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # First deployments on a fresh Pages site can queue for several minutes.
+    timeout-minutes: 15
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
