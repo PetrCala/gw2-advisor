@@ -13,7 +13,30 @@ Near-zero-budget design: data collection runs on GitHub Actions cron, price hist
 - `features/` velocity, fill time, undercut rate, book depth
 - `scorers/` flip EV ranking and seasonal signals
 - `report/` daily HTML/CLI report
+- `account/` your own trading results, needs an API key
 - `archive/` preserved third-party data, see its README for provenance
+
+## Checking your own trading
+
+Copy `.env.example` to `.env` and put a GW2 API key in it, then:
+
+```
+python -m account.window --hours 5     # what your trading did in that window
+python -m account.snapshot             # value the account, diff against the last one
+```
+
+`account.window` reads completed trading post transactions and marks the stock
+they moved against the live order book, so it separates cash that moved from
+value that moved. Buying 100g of stock drops cash by 100g while account value
+barely moves, and the window report says so instead of reporting a 100g loss.
+
+The window covers at most the last 90 days, the limit of what the transaction
+history endpoint keeps.
+
+`account.snapshot` is the baseline half. No public API serves your account
+value as it stood in the past, not the official one and not gw2efficiency, so
+account value deltas are only available between snapshots you have taken.
+Snapshots are local and git-ignored.
 
 ## Daily report
 
