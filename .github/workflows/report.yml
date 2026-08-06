@@ -1,6 +1,9 @@
 name: report
 
 # Daily flip report to GitHub Pages, after the 02:40 compaction has run.
+# Two jobs on purpose: a job with an environment gets an environment-scoped
+# OIDC sub claim, which the AWS role trust (pinned to refs/heads/main) does
+# not match. So AWS work happens in build, and only deploy touches Pages.
 
 on:
   schedule:
@@ -16,12 +19,9 @@ concurrency:
   group: report
 
 jobs:
-  report:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -40,5 +40,14 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
       - uses: actions/deploy-pages@v4
         id: deploy
