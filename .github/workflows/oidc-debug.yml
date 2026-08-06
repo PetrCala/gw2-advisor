@@ -1,0 +1,25 @@
+name: oidc-debug
+
+# Manual diagnostic: prints the decoded claims of this repo's OIDC token
+# (iss/aud/sub/ref), never the token itself. Use when AssumeRoleWithWebIdentity
+# fails and the trust policy looks right.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: decode token claims
+        run: |
+          TOKEN=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+')
+          PAD=$(( (4 - ${#PAYLOAD} % 4) % 4 ))
+          echo "$PAYLOAD$(printf '=%.0s' $(seq 1 $PAD 2>/dev/null))" | base64 -d 2>/dev/null | \
+            jq '{iss, aud, sub, ref, repository, repository_id, repository_owner_id}'
