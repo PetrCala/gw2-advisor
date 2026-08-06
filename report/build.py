@@ -16,7 +16,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from collector import dw2
+from collector import dw2, gw2api
+from features import reprice
 from scorers import flip
 
 SITE = Path(__file__).resolve().parent.parent / "site"
@@ -35,17 +36,26 @@ CSV_COLS = [
     "sell_flow",
     "round_trip_days",
     "ev_day",
+    "outbid_day",
+    "undercut_day",
+    "exit_pct",
     "confidence",
 ]
 
 ASSUMPTIONS = {
-    "placement": "buy order 1c above best buy, listing 1c under best sell",
+    "placement": "prices walked into order-book gaps, accepting at most "
+    f"{flip.WAIT_TOLERANCE_DAYS:g} days of queue ahead of us per side",
     "fees": "15% of sale (5% listing, 10% tax)",
-    "capture": f"{flip.CAPTURE:.0%} of each side's 7-day average filled flow",
+    "capture": f"{flip.CAPTURE:.0%} of each side's 7-day average filled flow "
+    "once our order reaches the front",
     "lot_size": f"capped by {flip.CAPITAL_PER_ITEM // 10000}g capital per item "
-    f"and a {flip.MAX_ROUND_TRIP_DAYS:g}-day round trip",
+    f"and a {flip.MAX_ROUND_TRIP_DAYS:g}-day round trip including queue wait",
     "filters": f"margin at least {flip.MIN_MARGIN_PCT:.0%} of cost, "
-    f"at least {flip.MIN_FLOW:g} units/day filled on both sides",
+    f"at least {flip.MIN_FLOW:g} units/day filled on both sides, "
+    f"items repriced more than {flip.PENNY_WAR_PER_DAY:g} times/day dropped "
+    "as penny wars",
+    "exit": "exit % is the loss per unit if the whole lot were dumped into "
+    "the current buy book right after purchase",
 }
 
 
@@ -65,10 +75,35 @@ def main():
             if p:
                 it["buy_price"], it["buy_quantity"], it["sell_price"], it["sell_quantity"] = p
 
-    picks = flip.score_all(snap)
+    shortlist = flip.score_all(snap, top_n=flip.SHORTLIST_N)
+    books = gw2api.fetch_listings([p["id"] for p in shortlist])
+
+    rates = None
+    if not local:
+        try:
+            rows, span = reprice.load_events(store)
+            if rows:
+                rates = reprice.reprice_rates(rows, span)
+        except Exception as e:  # rates refine the output, they don't gate it
+            print(f"reprice rates unavailable: {e}")
+
+    picks = []
+    for p in shortlist:
+        b = books.get(p["id"])
+        if not b:
+            continue
+        r = flip.rescore(p, b, rates.get(p["id"], (0.0, 0.0)) if rates else None)
+        if r:
+            picks.append(r)
+    picks.sort(key=lambda s: s["ev_day"], reverse=True)
+    picks = picks[: flip.TOP_N]
+
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     write_site(picks, scanned=len(snap), generated=generated, price_ts=price_ts)
-    print(f"{len(picks)} picks from {len(snap)} items -> {SITE / 'index.html'}")
+    print(
+        f"{len(picks)} picks from {len(shortlist)} shortlisted of {len(snap)} items "
+        f"(reprice rates: {'yes' if rates else 'no'}) -> {SITE / 'index.html'}"
+    )
 
 
 def write_site(picks, scanned, generated, price_ts):
@@ -161,6 +196,9 @@ var cols = [
   {key: "capital", label: "Capital", money: true},
   {key: "buy_flow", label: "Buys/d"},
   {key: "sell_flow", label: "Sells/d"},
+  {key: "outbid_day", label: "Outbid/d"},
+  {key: "undercut_day", label: "Under/d"},
+  {key: "exit_pct", label: "Exit", pct: true},
   {key: "round_trip_days", label: "Round trip", days: true},
   {key: "ev_day", label: "EV/day", money: true},
   {key: "confidence", label: "Conf", str: true}
@@ -181,6 +219,7 @@ function money(c) {
 }
 function cell(r, c) {
   var v = r[c.key];
+  if (v === null || v === undefined) return "";
   if (c.key === "name")
     return '<a class="r-' + esc(r.rarity) + '" href="https://www.gw2bltc.com/en/item/' +
       r.id + '" title="' + esc(r.rarity) + '">' + esc(v) + "</a>";
@@ -194,6 +233,8 @@ function cell(r, c) {
 function render() {
   var sorted = rows.slice().sort(function (a, b) {
     var x = a[sortKey], y = b[sortKey];
+    if (x === null || x === undefined) x = -Infinity;
+    if (y === null || y === undefined) y = -Infinity;
     var d = typeof x === "string" ? x.localeCompare(y) : x - y;
     return sortAsc ? d : -d;
   });
