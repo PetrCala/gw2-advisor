@@ -46,7 +46,7 @@ Flip scorer v1 (assumptions are constants in `scorers/flip.py`):
 - filters: both sides fill at least 24 units/day (7d average), margin at least 5% of cost, sell above vendor floor
 - confidence from three checks: spread survives on 7d average prices, 7d sell band under 15%, yesterday's flow within 2x of the weekly average on both sides
 
-Report (report.yml, hourly at :15): GitHub Pages, top 50 by EV/day, sortable table plus data.csv/data.json. Speculative seasonal picks arrive with M4.
+Report (report.yml, daily 04:10 UTC after compaction, dispatchable on demand): GitHub Pages, top 50 by EV/day, sortable table plus data.csv/data.json. Speculative seasonal picks arrive with M4. (Ran hourly briefly on 2026-08-06, reverted to daily.)
 
 ### M3: depth + competition features
 
