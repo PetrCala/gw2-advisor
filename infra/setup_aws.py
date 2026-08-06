@@ -67,8 +67,14 @@ def ensure_bucket(s3):
 def ensure_oidc_provider(iam, account):
     arn = f"arn:aws:iam::{account}:oidc-provider/{OIDC_HOST}"
     try:
-        iam.get_open_id_connect_provider(OpenIDConnectProviderArn=arn)
-        print("OIDC provider already exists")
+        info = iam.get_open_id_connect_provider(OpenIDConnectProviderArn=arn)
+        audiences = info["ClientIDList"]
+        print(f"OIDC provider already exists, audiences: {audiences}")
+        if "sts.amazonaws.com" not in audiences:
+            iam.add_client_id_to_open_id_connect_provider(
+                OpenIDConnectProviderArn=arn, ClientID="sts.amazonaws.com"
+            )
+            print("added missing sts.amazonaws.com audience to existing provider")
     except iam.exceptions.NoSuchEntityException:
         iam.create_open_id_connect_provider(
             Url=f"https://{OIDC_HOST}",
@@ -133,6 +139,11 @@ def main():
     ensure_bucket(s3)
     provider_arn = ensure_oidc_provider(iam, account)
     role_arn = ensure_role(iam, provider_arn)
+
+    # Show the effective trust policy so OIDC failures are diagnosable from output.
+    trust_doc = iam.get_role(RoleName=ROLE)["Role"]["AssumeRolePolicyDocument"]
+    print("\neffective trust policy:")
+    print(json.dumps(trust_doc, indent=2))
 
     print("\ndone. Now store the repo variables:")
     print(f'  gh variable set AWS_ROLE_ARN --repo {REPO} --body "{role_arn}"')
