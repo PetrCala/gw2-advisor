@@ -1,13 +1,15 @@
 name: report
 
-# Daily flip report to GitHub Pages, after the 02:40 compaction has run.
+# Hourly flip report to GitHub Pages. Prices come from the collector state
+# (10-minute cadence), flow aggregates from the datawars2 mirror (roughly
+# hourly), so rebuilding more often than hourly would add nothing.
 # Two jobs on purpose: a job with an environment gets an environment-scoped
 # OIDC sub claim, which the AWS role trust (pinned to refs/heads/main) does
 # not match. So AWS work happens in build, and only deploy touches Pages.
 
 on:
   schedule:
-    - cron: "10 4 * * *"
+    - cron: "15 * * * *"
   workflow_dispatch:
 
 permissions:

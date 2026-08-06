@@ -17,7 +17,7 @@ Near-zero-budget design: data collection runs on GitHub Actions cron, price hist
 
 ## Daily report
 
-The flip shortlist publishes to [petrcala.github.io/gw2-advisor](https://petrcala.github.io/gw2-advisor/) every morning (04:10 UTC). Build it locally without AWS access:
+The flip shortlist publishes to [petrcala.github.io/gw2-advisor](https://petrcala.github.io/gw2-advisor/) hourly (at :15, plus GitHub cron jitter). Build it locally without AWS access:
 
 ```
 pip install -r collector/requirements.txt
