@@ -13,7 +13,7 @@
 
 Repo, scaffold, roadmap, issues, and the gw2profits.com data archive (site shut down 2026-08-15; recipe/salvage dump preserved under `archive/gw2profits/`).
 
-### M1: collector + storage
+### M1: collector + storage (done)
 
 Poll `/v2/commerce/prices` for all tradable items (~27k, 135 paginated requests at 200/page, well under the 300 req/min limit) on a cron workflow every ~10 min.
 
@@ -30,11 +30,23 @@ Storage (decided): S3, private bucket `gw2-advisor-data-petrcala` in us-east-1.
 - Public access fully blocked, so there is no public-egress cost vector; our own Actions reads sit inside the 100GB/month free egress tier
 - Auth via GitHub OIDC (no long-lived keys); the role can touch only this bucket, trust is limited to this repo's main branch. Setup in `infra/setup_aws.py`
 
-### M2: backfill + flip scorer v1 + report
+### M2: backfill + flip scorer v1 + report (done)
 
-- Backfill multi-year history from the datawars2.ie public API.
-- Flip scorer: margin after 15% tax, velocity estimate from listing deltas, fill-time estimate (queue ahead / velocity), EV/day ranking.
-- Daily report published via GitHub Pages: item, buy at, sell at, qty, expected round-trip time, EV/day.
+Data sources (decided):
+
+- datawars2.ie mirrors TP data back to 2012-10: daily price/quantity extremes from the start, fill and churn counts (`buy_sold`, `sell_sold`, listed/delisted) from ~2019. Its `buy_sold` counts units filled against buy orders (our buy side), `sell_sold` units bought off sell listings (our sell side).
+- One-time backfill (`collector/backfill.py`, backfill.yml): full daily history for every tradable id into `history/dw2/chunk-NNNN.parquet`, 100 ids per chunk, 10 ids per request, throttled, resumable by skipping existing keys. Roughly 280 objects, one to two GB. This feeds M4 seasonality; the daily scorer does not read it.
+- The daily scorer reads the datawars2 item snapshot (names, vendor floors, 1d/7d/1m rolling fill counts; one request) plus our own `state/latest.json.gz` for fresher prices and queue sizes.
+
+Flip scorer v1 (assumptions are constants in `scorers/flip.py`):
+
+- queue-front placement (buy +1c, sell -1c), 15% TP cut
+- we capture 25% of a side's daily filled flow while at the front
+- EV/day = after-fee margin / per-unit cycle time (independent of lot size; capital recycles); suggested qty capped by 100g capital per item and a 2-day round trip
+- filters: both sides fill at least 24 units/day (7d average), margin at least 5% of cost, sell above vendor floor
+- confidence from three checks: spread survives on 7d average prices, 7d sell band under 15%, yesterday's flow within 2x of the weekly average on both sides
+
+Report (report.yml, daily 04:10 UTC after compaction): GitHub Pages, top 50 by EV/day, sortable table plus data.csv/data.json. Speculative seasonal picks arrive with M4.
 
 ### M3: depth + competition features
 

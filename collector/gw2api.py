@@ -15,6 +15,12 @@ PAGE_SIZE = 200
 RETRIES = 3
 
 
+def fetch_tradable_ids(session=None):
+    """Return the sorted list of all tradable item ids."""
+    s = session or requests.Session()
+    return sorted(_get_json(s, PRICES_URL))
+
+
 def fetch_all_prices(session=None):
     """Return {item_id: [buy_price, buy_qty, sell_price, sell_qty]}."""
     s = session or requests.Session()
