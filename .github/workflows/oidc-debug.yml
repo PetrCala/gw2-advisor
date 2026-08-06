@@ -6,8 +6,6 @@ name: oidc-debug
 
 on:
   workflow_dispatch:
-  push:
-    branches: [m1-oidc-fix]
 
 permissions:
   id-token: write

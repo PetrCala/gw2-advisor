@@ -21,6 +21,9 @@ from botocore.exceptions import ClientError
 BUCKET = "gw2-advisor-data-petrcala"
 REGION = "us-east-1"
 REPO = "PetrCala/gw2-advisor"
+# GitHub issues ID-qualified OIDC sub claims (owner@id/repo@id); immutable ids
+# pin the trust even if the repo name is ever recycled.
+REPO_ID_QUALIFIED = "PetrCala@79160025/gw2-advisor@1325208858"
 ROLE = "gw2-advisor-actions"
 RAW_EXPIRY_DAYS = 30
 OIDC_HOST = "token.actions.githubusercontent.com"
@@ -95,7 +98,12 @@ def ensure_role(iam, provider_arn):
                 "Action": "sts:AssumeRoleWithWebIdentity",
                 "Condition": {
                     "StringEquals": {f"{OIDC_HOST}:aud": "sts.amazonaws.com"},
-                    "StringLike": {f"{OIDC_HOST}:sub": f"repo:{REPO}:ref:refs/heads/main"},
+                    "StringLike": {
+                        f"{OIDC_HOST}:sub": [
+                            f"repo:{REPO}:ref:refs/heads/main",
+                            f"repo:{REPO_ID_QUALIFIED}:ref:refs/heads/main",
+                        ]
+                    },
                 },
             }
         ],
