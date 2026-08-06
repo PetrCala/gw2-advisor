@@ -1,8 +1,10 @@
 # gw2-advisor
 
+[![collect](https://github.com/PetrCala/gw2-advisor/actions/workflows/collect.yml/badge.svg)](https://github.com/PetrCala/gw2-advisor/actions/workflows/collect.yml)
+
 Trade advisor for the Guild Wars 2 trading post. Collects price data, computes velocity and fill-time features, and produces a daily list of flip and speculation candidates for manual in-game trading.
 
-Zero-budget design: data collection runs on GitHub Actions cron, storage lives in git and GitHub Releases, reports publish via GitHub Pages.
+Near-zero-budget design: data collection runs on GitHub Actions cron, price history lives in a size-capped S3 bucket (expected cost well under $1/month), reports publish via GitHub Pages.
 
 ## Layout
 
