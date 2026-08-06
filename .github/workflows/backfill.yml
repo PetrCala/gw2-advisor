@@ -1,0 +1,39 @@
+name: backfill
+
+# One-time (rerunnable) datawars2 history backfill. Resumable: chunks whose
+# parquet object already exists in S3 are skipped, so rerun after a failure.
+
+on:
+  workflow_dispatch:
+    inputs:
+      chunk:
+        description: single chunk number, empty for all
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: backfill
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: collector/requirements-compact.txt
+      - run: pip install -r collector/requirements-compact.txt
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: python -m collector.backfill ${{ inputs.chunk }}
+        env:
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
