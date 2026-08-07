@@ -65,6 +65,7 @@ SEASONAL_CSV_COLS = [
     "worst_ret",
     "last_ret",
     "exit_pct",
+    "exit_risk",
     "strength",
     "cur_price",
     "limit_price",
@@ -97,6 +98,7 @@ ACTIONS_COLS = [
     "flow_used",
     "flow_estimated",
     "exit_pct",
+    "exit_risk",
     "days_to_buy",
     "days_left",
     "confidence",
@@ -125,12 +127,18 @@ SEASONAL_ASSUMPTIONS = {
     f"= recent-{season_actions.RECENT_CYCLES}-cycle median sell price x 85% / "
     f"(1 + {season_actions.RETURN_HURDLE:.0%} hurdle); suggested qty = "
     f"{season_actions.CAPTURE:.0%} of the buy-window flow over its remaining "
-    f"days, capped by the same share of the sell window (exit liquidity) and "
-    f"by {season_actions.SEASON_CAPITAL // 10000}g of capital per pick; windows "
-    "with no observed flow fall back to recent overall daily flow, marked est",
+    f"days, capped by the same share of the sell window (exit liquidity), by "
+    f"{season_actions.SEASON_CAPITAL // 10000}g of capital per pick, and by "
+    f"whatever the live buy book can absorb without the exit floor below "
+    f"({season_actions.EXIT_FLOOR_MIN:.0%}); windows with no observed flow "
+    "fall back to recent overall daily flow, marked est",
     "exit": "exit % is the loss per unit if the suggested lot were dumped into "
     "today's buy book instead of waiting for the peak, fetched live for the picks "
-    "inside a buy or sell window; worst is the worst past cycle for comparison",
+    "inside a buy or sell window; suggested qty is shrunk first to keep that loss "
+    f"above {season_actions.EXIT_FLOOR_MIN:.0%}, and a buy_now pick with no lot "
+    "size at all that clears it is flagged exit risk and dropped out of the buy "
+    "queue rather than read as actionable; worst is the worst past cycle for "
+    "comparison",
 }
 
 ASSUMPTIONS = {
@@ -228,11 +236,14 @@ def main():
 
 
 def add_exit_floor(spicks):
-    """Attach exit_pct to the picks in a buy or sell window.
+    """Attach exit_pct to the picks in a buy or sell window, and act on it.
 
     Only those few need an order book: they are the ones a position could
     be opened or closed on today, so the extra listings call stays small.
     A failure leaves the column blank rather than gating the page.
+    apply_exit_floor caps suggested_qty to what the book can absorb within
+    the floor and demotes a buy_now pick with no viable size at all out of
+    the buy queue; see season.actions for the mechanics.
     """
     live = [p for p in spicks if p["bucket"] in ("buy_now", "sell_active")]
     if not live:
@@ -244,9 +255,7 @@ def add_exit_floor(spicks):
         return
     for p in live:
         b = books.get(p["id"])
-        p["exit_pct"] = season_actions.exit_pct(
-            b["buys"] if b else None, p["suggested_qty"], p["cur_price"]
-        )
+        season_actions.apply_exit_floor(p, b["buys"] if b else None)
 
 
 def money_html(c):
@@ -261,9 +270,11 @@ def money_html(c):
     return out + f'<span class="c">{k}c</span>'
 
 
-def _mmdd(iso):
+def _mmdd(iso, today):
+    """'Mon DD', with the year appended only when it differs from today's."""
     d = date.fromisoformat(iso)
-    return f"{d.strftime('%b')} {d.day:02d}"
+    s = f"{d.strftime('%b')} {d.day:02d}"
+    return s if d.year == today.year else f"{s}, {d.year}"
 
 
 def _item_link(p):
@@ -274,7 +285,7 @@ def _item_link(p):
     )
 
 
-def queue_html(spicks):
+def queue_html(spicks, today):
     """The action queue panel: today's answers, ahead of the full table."""
     groups = {b: [] for b in season_actions.BUCKETS}
     for p in spicks:
@@ -290,7 +301,7 @@ def queue_html(spicks):
             lines.append(
                 f"<li>{_item_link(p)}: pay up to {money_html(p['limit_price'])} "
                 f"(now {money_html(p['cur_price'])}){qty}, "
-                f"closes {_mmdd(p['buy_closes'])}</li>"
+                f"closes {_mmdd(p['buy_closes'], today)}</li>"
             )
         parts.append("<ul>" + "".join(lines) + "</ul>")
     else:
@@ -301,7 +312,7 @@ def queue_html(spicks):
         parts.append(f"<h3>Opens soon ({len(soon)})</h3><ul>")
         for p in soon:
             parts.append(
-                f"<li>{_item_link(p)}: opens {_mmdd(p['buy_opens'])} "
+                f"<li>{_item_link(p)}: opens {_mmdd(p['buy_opens'], today)} "
                 f"({p['days_to_buy']}d), pay up to {money_html(p['limit_price'])}</li>"
             )
         parts.append("</ul>")
@@ -312,15 +323,25 @@ def queue_html(spicks):
         for p in selling:
             parts.append(
                 f"<li>{_item_link(p)}: sell window closes "
-                f"{_mmdd(p['sell_closes'])}</li>"
+                f"{_mmdd(p['sell_closes'], today)}</li>"
+            )
+        parts.append("</ul>")
+
+    risky = [p for p in spicks if p.get("exit_risk")]
+    if risky:
+        parts.append(f"<h3>Exit risk ({len(risky)})</h3><ul>")
+        for p in risky:
+            parts.append(
+                f"<li>{_item_link(p)}: exit floor {p['exit_pct']:+.0%}, no "
+                f"bail-out size in the book (bucket {p['bucket']})</li>"
             )
         parts.append("</ul>")
 
     dormant = len(groups["dormant"])
     if dormant:
         parts.append(
-            f"<p>{dormant} picks dormant (window months away, or the entry "
-            "already gone); the table below has every row.</p>"
+            f"<p>{dormant} picks dormant (window months away, entry already "
+            "gone, or no viable exit); the table below has every row.</p>"
         )
     return '<div class="queue">' + "".join(parts) + "</div>"
 
@@ -333,8 +354,8 @@ def festivals_html(festivals, today):
         est = ", est." if f["estimated"] else ""
         picks = f", {f['picks']} picks" if f["picks"] else ""
         bits.append(
-            f"<b>{escape(f['name'])}</b> {_mmdd(f['start'])} - "
-            f"{_mmdd(f['end'])} ({when}{est}{picks})"
+            f"<b>{escape(f['name'])}</b> {_mmdd(f['start'], today)} - "
+            f"{_mmdd(f['end'], today)} ({when}{est}{picks})"
         )
     return " &middot; ".join(bits)
 
@@ -389,7 +410,7 @@ def write_site(picks, scanned, generated, price_ts, seasonal=None, festivals=())
     html = TEMPLATE
     html = html.replace("__ROWS__", json.dumps(picks))
     html = html.replace("__SEASONAL_ROWS__", json.dumps(spicks))
-    html = html.replace("__QUEUE__", queue_html(spicks) if spicks else "")
+    html = html.replace("__QUEUE__", queue_html(spicks, today) if spicks else "")
     html = html.replace(
         "__FESTIVALS__", festivals_html(festivals, today) if festivals else ""
     )
@@ -436,6 +457,7 @@ td a:hover { text-decoration: underline; }
 .est { color: #8a8f9c; font-size: 11px; }
 .v-buy_now { color: #7ec97f; } .v-opens_soon { color: #e0c068; }
 .v-sell_active { color: #8ab4f8; } .v-dormant { color: #8a8f9c; }
+.exit-risk { color: #e06c75; font-weight: 600; }
 .queue { background: #1b1e25; border: 1px solid #3a3f4b; border-radius: 6px;
          padding: 4px 16px 10px; margin: 12px 0 20px; }
 .queue h3 { font-size: 14px; margin: 10px 0 2px; color: #aab0bd; }
@@ -556,6 +578,9 @@ function cell(r, c) {
     return '<span class="conf-' + esc(v) + '">' + esc(v) + "</span>";
   if (c.key === "verdict")
     return '<span class="v-' + esc(r.bucket) + '">' + esc(v) + "</span>";
+  if (c.key === "exit_pct" && r.exit_risk)
+    return '<span class="exit-risk" title="no bail-out size in the live book">' +
+      (100 * v).toFixed(1) + "%!</span>";
   if (c.key === "flow_used" && r.flow_estimated)
     return v.toLocaleString() +
       ' <span class="est" title="no flow observed in the window; recent overall' +

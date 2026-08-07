@@ -16,6 +16,12 @@ sell-window price still nets RETURN_HURDLE after fees; a current price
 above it means the cheap entry is gone regardless of how good the pattern
 looks. Recent medians use the last RECENT_CYCLES cycles, matching the
 entry-premium basis in season/compute.py.
+
+The exit floor is the mirror check on the way out: EXIT_FLOOR_MIN bounds
+how much dumping the suggested lot into today's buy book could lose, and
+sizing shrinks the lot to whatever the book actually absorbs within it. A
+book too thin for any size to clear the floor has no real bail-out, so
+apply_exit_floor flags it and demotes a buy_now pick out of the queue.
 """
 
 from datetime import date, timedelta
@@ -32,14 +38,23 @@ SEASON_CAPITAL = 500_000  # copper per pick; capital sits locked for months
 OPENS_SOON_DAYS = 30
 UNCONFIRMED_WARN_DAYS = 60
 
+# A dumped lot losing more than this is still tolerable: sizing caps the
+# suggested qty to whatever the live buy book can absorb within it. A pick
+# that can't clear the floor at any size (a thin or gapped book right under
+# the touch, not a sizing problem) gets flagged exit risk and, if it was
+# buy_now, demoted out of the buy queue instead of read as actionable.
+EXIT_FLOOR_MIN = -0.40
+
 BUCKETS = ("buy_now", "opens_soon", "sell_active", "dormant")
 
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
-def _fmt(d):
-    return f"{_MONTHS[d.month - 1]} {d.day:02d}"
+def _fmt(d, today):
+    """'Mon DD', with the year appended only when it differs from today's."""
+    s = f"{_MONTHS[d.month - 1]} {d.day:02d}"
+    return s if d.year == today.year else f"{s}, {d.year}"
 
 
 def _doy(d):
@@ -154,6 +169,64 @@ def exit_pct(buys, qty, price):
     return round((net / qty - price) / price, 3)
 
 
+def bounded_qty(buys, qty, price, floor=EXIT_FLOOR_MIN):
+    """Largest lot at or below qty whose dump loss stays above floor.
+
+    dump_value walks the book best-price-first, so exit_pct only improves
+    (or holds) as qty shrinks; that monotonicity is what makes a binary
+    search here safe. Returns qty unchanged when there is nothing to check
+    it against, and 0 when even a single unit breaches the floor: the book
+    is too thin right under the touch for any size to bail out within it.
+    """
+    if not buys or not qty or not price:
+        return qty
+    if exit_pct(buys, qty, price) >= floor:
+        return qty
+    if exit_pct(buys, 1, price) < floor:
+        return 0
+    lo, hi = 1, qty
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if exit_pct(buys, mid, price) >= floor:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+def apply_exit_floor(pick, buys, floor=EXIT_FLOOR_MIN):
+    """Cap suggested_qty to the book and flag/demote a catastrophic exit.
+
+    Mutates and returns pick. exit_pct always ends up describing whatever
+    lot is left suggested: unchanged when the book already absorbs it above
+    the floor, shrunk to the largest lot that does, or, when no lot size at
+    all clears the floor, cleared to None with exit_risk set and exit_pct
+    left at the original (catastrophic) reading for the flag. A buy_now pick
+    with no viable exit is demoted to dormant rather than read as actionable
+    today; a sell_active one just gets the flag, since there's no buy
+    decision left to gate there.
+    """
+    price = pick.get("cur_price")
+    qty = pick.get("suggested_qty")
+    pick["exit_pct"] = exit_pct(buys, qty, price)
+    pick["exit_risk"] = False
+    if not buys or not qty or not price:
+        return pick
+    capped = bounded_qty(buys, qty, price, floor)
+    if capped == 0:
+        pick["exit_risk"] = True
+        pick["suggested_qty"] = None
+        if pick["bucket"] == "buy_now":
+            pick["bucket"] = "dormant"
+            pick["verdict"] = f"skip: exit floor {pick['exit_pct']:+.0%}, no bail-out size"
+            rank = BUCKETS.index(pick["bucket"])
+            pick["act"] = round((len(BUCKETS) - 1 - rank) * 10 + pick["score"], 3)
+    elif capped != qty:
+        pick["suggested_qty"] = capped
+        pick["exit_pct"] = exit_pct(buys, capped, price)
+    return pick
+
+
 def enrich(pick, today, fresh_price=None, fresh_flow=None):
     """Recompute calendar and price fields, attach bucket and verdict.
 
@@ -186,16 +259,16 @@ def enrich(pick, today, fresh_price=None, fresh_flow=None):
     )
 
     if in_buy and limit is not None and price is not None and price <= limit:
-        bucket, verdict = "buy_now", f"buy now, closes {_fmt(b1)}"
+        bucket, verdict = "buy_now", f"buy now, closes {_fmt(b1, today)}"
     elif in_buy:
         over = f"{prem:+.0%} over trough" if prem and prem > 0 else "over the ceiling"
         bucket, verdict = "dormant", f"too late: {over}"
     elif s0 <= today <= s1:
-        bucket, verdict = "sell_active", f"sell window, closes {_fmt(s1)}"
+        bucket, verdict = "sell_active", f"sell window, closes {_fmt(s1, today)}"
     elif dtb <= OPENS_SOON_DAYS:
-        bucket, verdict = "opens_soon", f"opens {_fmt(b0)} ({dtb}d)"
+        bucket, verdict = "opens_soon", f"opens {_fmt(b0, today)} ({dtb}d)"
     else:
-        bucket, verdict = "dormant", f"opens {_fmt(b0)} ({dtb}d)"
+        bucket, verdict = "dormant", f"opens {_fmt(b0, today)} ({dtb}d)"
 
     rank = BUCKETS.index(bucket)
     pick.update(
@@ -207,8 +280,8 @@ def enrich(pick, today, fresh_price=None, fresh_flow=None):
         suggested_qty=qty,
         flow_used=flow,
         flow_estimated=flow_est,
-        buy_window=f"{_fmt(b0)} - {_fmt(b1)}",
-        sell_window=f"{_fmt(s0)} - {_fmt(s1)}",
+        buy_window=f"{_fmt(b0, today)} - {_fmt(b1, today)}",
+        sell_window=f"{_fmt(s0, today)} - {_fmt(s1, today)}",
         buy_opens=b0.isoformat(),
         buy_closes=b1.isoformat(),
         sell_opens=s0.isoformat(),
