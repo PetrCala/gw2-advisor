@@ -57,6 +57,16 @@ def _fmt(d, today):
     return s if d.year == today.year else f"{s}, {d.year}"
 
 
+def _fmt_span(d0, d1, today):
+    """'Mon DD - Mon DD', a shared non-current year written once at the end."""
+    if d0.year == d1.year and d0.year != today.year:
+        return (
+            f"{_MONTHS[d0.month - 1]} {d0.day:02d} - "
+            f"{_MONTHS[d1.month - 1]} {d1.day:02d}, {d1.year}"
+        )
+    return f"{_fmt(d0, today)} - {_fmt(d1, today)}"
+
+
 def _doy(d):
     return min(d.timetuple().tm_yday, 365)
 
@@ -280,8 +290,8 @@ def enrich(pick, today, fresh_price=None, fresh_flow=None):
         suggested_qty=qty,
         flow_used=flow,
         flow_estimated=flow_est,
-        buy_window=f"{_fmt(b0, today)} - {_fmt(b1, today)}",
-        sell_window=f"{_fmt(s0, today)} - {_fmt(s1, today)}",
+        buy_window=_fmt_span(b0, b1, today),
+        sell_window=_fmt_span(s0, s1, today),
         buy_opens=b0.isoformat(),
         buy_closes=b1.isoformat(),
         sell_opens=s0.isoformat(),

@@ -235,6 +235,26 @@ def test_fmt_appends_year_only_when_it_differs_from_today():
     assert actions._fmt(date(2025, 12, 16), today) == "Dec 16, 2025"
 
 
+def test_fmt_span_writes_a_shared_future_year_once():
+    today = date(2026, 8, 7)
+    span = actions._fmt_span(date(2027, 2, 12), date(2027, 3, 11), today)
+    assert span == "Feb 12 - Mar 11, 2027"
+
+
+def test_fmt_span_keeps_per_date_years_when_they_differ():
+    today = date(2026, 8, 7)
+    span = actions._fmt_span(date(2026, 12, 16), date(2027, 1, 20), today)
+    assert span == "Dec 16 - Jan 20, 2027"
+    span = actions._fmt_span(date(2026, 9, 7), date(2026, 9, 27), today)
+    assert span == "Sep 07 - Sep 27"
+
+
+def test_enrich_writes_a_shared_future_year_once():
+    p = actions.enrich(_pick(buy_doy=[43, 70]), date(2026, 8, 7))
+    assert p["buy_opens"] == "2027-02-12"
+    assert p["buy_window"] == "Feb 12 - Mar 11, 2027"
+
+
 # --- verdicts ---------------------------------------------------------------
 
 
