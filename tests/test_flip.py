@@ -130,3 +130,29 @@ def test_rescore_without_rates_keeps_item():
 def test_rescore_empty_book_side_drops_item():
     pick = flip.score_item(dict(BASE))
     assert flip.rescore(pick, {"buys": [], "sells": BOOK["sells"]}, None) is None
+
+
+def test_rescore_attaches_exit_prices_and_verdict():
+    pick = flip.score_item(dict(BASE))
+    r = flip.rescore(pick, BOOK, (5.0, 5.0))
+    # break-even recovers buy_at after fees; bail recovers the dump value.
+    assert int((r["break_even_sell"] - 1) * (1 - flip.TAX)) >= r["buy_at"]
+    assert int((r["break_even_sell"] - 2) * (1 - flip.TAX)) < r["buy_at"]
+    # A healthy margin, high confidence, calm reprice rates and an exit
+    # floor inside the caution threshold reads as act now.
+    assert r["bucket"] == "act_now"
+    assert "act now" in r["verdict"]
+    assert r["bail_price"] < r["break_even_sell"]
+    assert r["act"] > 0
+
+
+def test_rescore_act_score_prioritizes_bucket_over_ev_day():
+    pick = flip.score_item(dict(BASE))
+    healthy = flip.rescore(pick, BOOK, (5.0, 5.0))
+    # Same book and flow, but an elevated (not yet penny-war) reprice rate
+    # drops it to caution even though nothing about the price or margin
+    # changed.
+    caution = flip.rescore(pick, BOOK, (40.0, 40.0))
+    assert healthy["bucket"] == "act_now"
+    assert caution["bucket"] == "caution"
+    assert healthy["act"] > caution["act"]
