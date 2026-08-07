@@ -102,7 +102,8 @@ SEASONAL_ASSUMPTIONS = {
     "decomposition": "STL (period 52, robust) on weekly log sell prices over "
     "up to 8 years of daily history, refreshed weekly",
     "windows": "buy window brackets the seasonal trough, sell window the peak; "
-    "event-linked items track each year's actual festival dates",
+    "event-linked items track each year's actual festival dates, including the "
+    "upcoming window once the run is announced (typical dates until then)",
     "returns": "per cycle: buy at the median daily price inside the buy window, "
     "sell at the median inside the sell window, net of 15% fees; cycles missing "
     "observed prices in either window are dropped, not guessed",
