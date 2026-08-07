@@ -562,9 +562,6 @@ var cols = [
   {key: "capital", label: "Capital", money: true},
   {key: "buy_flow", label: "Buys/d"},
   {key: "sell_flow", label: "Sells/d"},
-  {key: "outbid_day", label: "Outbid"},
-  {key: "undercut_day", label: "Under"},
-  {key: "exit_pct", label: "Exit", pct: true},
   {key: "round_trip_days", label: "Trip", days: true},
   {key: "ev_day", label: "EV/day", money: true},
   {key: "confidence", label: "Conf", str: true}
