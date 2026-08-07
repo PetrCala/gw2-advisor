@@ -23,7 +23,7 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from statistics import median
 
-from season import cycles, events, windows
+from season import actions, cycles, events, windows
 from season import score as season_score
 
 MIN_SEASON_FLOW = 50.0  # units/day sold (1m average); we need exit liquidity
@@ -248,6 +248,11 @@ def main():
         f"{len(picks)} picks from {decomposed} decomposed "
         f"-> s3://{store.bucket}/{SEASON_KEY}"
     )
+    for f in actions.unconfirmed_soon(date.today()):
+        print(
+            f"warning: {f['name']} expected around {f['start']} but this "
+            "year's dates are unconfirmed; update season/events.py"
+        )
 
 
 if __name__ == "__main__":
