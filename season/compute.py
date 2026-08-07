@@ -144,6 +144,12 @@ def decompose(daily):
     return profile, strength
 
 
+def median_flow(flow, d0, d1):
+    """Median daily units sold inside [d0, d1], or None with no observations."""
+    vals = [v for d, v in flow.items() if d0.isoformat() <= d <= d1.isoformat()]
+    return round(median(vals)) if vals else None
+
+
 def build_pick(item_id, meta, daily, flow, profile, strength, through):
     """Assemble one scored pick with its full per-cycle evidence, or None."""
     if windows.amplitude(profile) < season_score.MIN_AMPLITUDE:
@@ -166,8 +172,7 @@ def build_pick(item_id, meta, daily, flow, profile, strength, through):
         return None
     rets = [c["ret"] for c in cyc]
     med_buy = median(c["buy"] for c in cyc[-3:])
-    b0, _, _, s1 = wins[cyc[-1]["year"]]
-    flow_vals = [v for d, v in flow.items() if b0.isoformat() <= d <= s1.isoformat()]
+    b0, b1, s0, s1 = wins[cyc[-1]["year"]]
     return {
         "id": item_id,
         "name": meta["name"],
@@ -188,7 +193,9 @@ def build_pick(item_id, meta, daily, flow, profile, strength, through):
         "strength": round(strength, 2),
         "cur_price": meta["cur_price"],
         "entry_premium": round(meta["cur_price"] / med_buy - 1, 3),
-        "window_flow": round(median(flow_vals)) if flow_vals else None,
+        "window_flow": median_flow(flow, b0, s1),
+        "buy_window_flow": median_flow(flow, b0, b1),
+        "sell_window_flow": median_flow(flow, s0, s1),
         "confidence": season_score.confidence(cyc),
         "score": round(sc, 4),
     }

@@ -51,6 +51,27 @@ def test_suggested_qty_flow_and_capital_bounds():
     assert actions.suggested_qty(100, 10, None) is None
 
 
+def test_suggested_qty_capped_by_sell_liquidity():
+    # 25% of 100/day over 10 buy days is 250, but the sell window only
+    # absorbs 25% of 20/day over 10 days.
+    assert actions.suggested_qty(100, 10, 120, sell_flow=20, sell_days=10) == 50
+    assert actions.suggested_qty(100, 10, 120, sell_flow=1000, sell_days=10) == 250
+    assert actions.suggested_qty(100, 10, 120, sell_flow=None, sell_days=10) == 250
+
+
+def test_sizing_flow_prefers_the_window_then_falls_back():
+    p = _pick(buy_window_flow=80, sell_window_flow=30)
+    assert actions.sizing_flow(p, "buy", 500) == (80, False)
+    assert actions.sizing_flow(p, "sell", 500) == (30, False)
+    # No per-window flow: the buy side still reads the older single number.
+    old = _pick(window_flow=60)
+    assert actions.sizing_flow(old, "buy", 500) == (60, False)
+    assert actions.sizing_flow(old, "sell", 500) == (500, True)
+    blank = _pick(window_flow=None)
+    assert actions.sizing_flow(blank, "buy", 500) == (500, True)
+    assert actions.sizing_flow(blank, "buy", None) == (None, False)
+
+
 def test_capture_matches_the_flip_scorer():
     assert actions.CAPTURE == flip.CAPTURE
 
@@ -118,6 +139,21 @@ def test_enrich_buy_now():
     assert p["suggested_qty"] == 425  # 25% of 100/day over 17 days
 
 
+def test_enrich_sizes_from_fresh_flow_when_the_window_has_none():
+    p = actions.enrich(_pick(window_flow=None), date(2026, 9, 10), fresh_flow=100)
+    # Both sides fall back to the same flow, so the 16-day sell window binds.
+    assert p["suggested_qty"] == 400
+    assert p["flow_used"] == 100
+    assert p["flow_estimated"]
+
+
+def test_enrich_caps_qty_by_the_sell_window():
+    p = actions.enrich(_pick(sell_window_flow=10), date(2026, 9, 10))
+    assert p["suggested_qty"] == 40  # 25% of 10/day over the 16 sell days
+    assert p["flow_used"] == 100
+    assert not p["flow_estimated"]
+
+
 def test_enrich_too_late_over_trough():
     p = actions.enrich(_pick(cur_price=300), date(2026, 9, 10))
     assert p["bucket"] == "dormant"
@@ -168,6 +204,14 @@ def test_enrich_delays_a_buy_to_the_announced_run():
     assert p["buy_closes"] == "2026-09-06"
     assert p["bucket"] == "opens_soon"
     assert p["days_to_buy"] == 3
+
+
+def test_enrich_rewrites_the_window_columns_to_the_shown_dates():
+    p = actions.enrich(
+        _pick(event="Festival of the Four Winds", buy_doy=[211, 238]),
+        date(2026, 8, 7),
+    )
+    assert p["buy_window"] == "Aug 10 - Sep 06"  # the artifact says Jul 30 - Aug 26
 
 
 def test_enrich_anchors_the_sell_window():
