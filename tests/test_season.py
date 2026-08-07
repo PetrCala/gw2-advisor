@@ -2,7 +2,7 @@ import math
 from datetime import date, timedelta
 
 from scorers import flip
-from season import cycles, events, score, windows
+from season import compute, cycles, events, score, windows
 
 
 def _in_span(span, week):
@@ -150,6 +150,16 @@ def test_event_windows_skip_years_the_festival_skipped():
 
 def test_tax_matches_the_flip_scorer():
     assert cycles.TAX == flip.TAX
+
+
+# --- flow evidence ---------------------------------------------------------
+
+
+def test_median_flow_slices_the_window():
+    flow = {"2025-11-30": 500, "2025-12-11": 10, "2025-12-14": 30,
+            "2025-12-20": 20, "2026-01-15": 900}
+    assert compute.median_flow(flow, date(2025, 12, 10), date(2025, 12, 24)) == 20
+    assert compute.median_flow(flow, date(2026, 3, 1), date(2026, 3, 31)) is None
 
 
 # --- score -----------------------------------------------------------------

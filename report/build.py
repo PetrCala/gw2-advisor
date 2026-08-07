@@ -68,6 +68,8 @@ SEASONAL_CSV_COLS = [
     "suggested_qty",
     "entry_premium",
     "window_flow",
+    "flow_used",
+    "flow_estimated",
     "confidence",
     "score",
     "cycles",
@@ -89,6 +91,8 @@ ACTIONS_COLS = [
     "cur_price",
     "entry_premium",
     "suggested_qty",
+    "flow_used",
+    "flow_estimated",
     "days_to_buy",
     "days_left",
     "confidence",
@@ -117,7 +121,9 @@ SEASONAL_ASSUMPTIONS = {
     f"= recent-{season_actions.RECENT_CYCLES}-cycle median sell price x 85% / "
     f"(1 + {season_actions.RETURN_HURDLE:.0%} hurdle); suggested qty = "
     f"{season_actions.CAPTURE:.0%} of the buy-window flow over its remaining "
-    f"days, capped at {season_actions.SEASON_CAPITAL // 10000}g per pick",
+    f"days, capped by the same share of the sell window (exit liquidity) and "
+    f"by {season_actions.SEASON_CAPITAL // 10000}g of capital per pick; windows "
+    "with no observed flow fall back to recent overall daily flow, marked est",
 }
 
 ASSUMPTIONS = {
@@ -187,10 +193,14 @@ def main():
     if seasonal:
         # The artifact's calendar and price fields go up to a week stale
         # between season runs; recompute them against today's snapshot.
-        fresh = {it.get("id"): it.get("sell_price") for it in snap}
+        fresh = {
+            it.get("id"): (it.get("sell_price"), (it.get("1m_sell_sold") or 0) / 30)
+            for it in snap
+        }
         today = datetime.now(timezone.utc).date()
         for p in seasonal["picks"]:
-            season_actions.enrich(p, today, fresh.get(p["id"]))
+            price, flow = fresh.get(p["id"], (None, None))
+            season_actions.enrich(p, today, price, flow)
         festivals = season_actions.next_festivals(today, seasonal["picks"])
 
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -390,6 +400,7 @@ td a { color: inherit; text-decoration: none; }
 td a:hover { text-decoration: underline; }
 .g { color: #e5c07b; } .s { color: #b4b9c4; } .c { color: #b87352; }
 .conf-high { color: #7ec97f; } .conf-medium { color: #e0c068; } .conf-low { color: #a0a5b1; }
+.est { color: #8a8f9c; font-size: 11px; }
 .v-buy_now { color: #7ec97f; } .v-opens_soon { color: #e0c068; }
 .v-sell_active { color: #8ab4f8; } .v-dormant { color: #8a8f9c; }
 .queue { background: #1b1e25; border: 1px solid #3a3f4b; border-radius: 6px;
@@ -479,7 +490,7 @@ var scols = [
   {key: "limit_price", label: "Pay up to", money: true},
   {key: "cur_price", label: "Price", money: true},
   {key: "suggested_qty", label: "Qty"},
-  {key: "window_flow", label: "Flow/d"},
+  {key: "flow_used", label: "Flow/d"},
   {key: "confidence", label: "Conf", str: true},
   {key: "score", label: "Score"}
 ];
@@ -506,6 +517,10 @@ function cell(r, c) {
     return '<span class="conf-' + esc(v) + '">' + esc(v) + "</span>";
   if (c.key === "verdict")
     return '<span class="v-' + esc(r.bucket) + '">' + esc(v) + "</span>";
+  if (c.key === "flow_used" && r.flow_estimated)
+    return v.toLocaleString() +
+      ' <span class="est" title="no flow observed in the window; recent overall' +
+      ' daily flow instead">est</span>';
   if (c.key === "n_cycles" && r.cycles) {
     var up = 0, tip = [];
     r.cycles.forEach(function (x) {

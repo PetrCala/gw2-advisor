@@ -110,14 +110,37 @@ def entry_premium(cur_price, cyc):
     return round(cur_price / med_buy - 1, 3)
 
 
-def suggested_qty(flow, days_remaining, limit):
-    """Units to buy: our flow share over the window, capped by capital."""
+def sizing_flow(pick, side, fresh_flow=None):
+    """(flow per day, estimated) for one side's window.
+
+    Fill counts only start around 2019 and some windows saw no observed
+    flow at all, so a missing window flow falls back to the item's recent
+    overall daily flow. That fallback ignores the season entirely, hence
+    the estimated flag.
+    """
+    flow = pick.get(f"{side}_window_flow")
+    if not flow and side == "buy":
+        flow = pick.get("window_flow")  # pre-split artifacts carry one number
+    if flow:
+        return flow, False
+    return (round(fresh_flow), True) if fresh_flow else (None, False)
+
+
+def suggested_qty(flow, days_remaining, limit, sell_flow=None, sell_days=None):
+    """Units to buy: our flow share over the window, capped by capital.
+
+    Exit liquidity bounds a hold as hard as entry liquidity does, so the
+    sell window gets the same capture cap when its flow is known.
+    """
     if not flow or not limit or not days_remaining:
         return None
-    return int(min(CAPTURE * flow * days_remaining, SEASON_CAPITAL // limit))
+    caps = [CAPTURE * flow * days_remaining, SEASON_CAPITAL // limit]
+    if sell_flow and sell_days:
+        caps.append(CAPTURE * sell_flow * sell_days)
+    return int(min(caps))
 
 
-def enrich(pick, today, fresh_price=None):
+def enrich(pick, today, fresh_price=None, fresh_flow=None):
     """Recompute calendar and price fields, attach bucket and verdict.
 
     Mutates and returns the pick. The artifact's stored days_to_buy,
@@ -125,6 +148,8 @@ def enrich(pick, today, fresh_price=None):
     everything here is recomputed from buy_doy/sell_doy anchored to the
     festival calendar, the cycles evidence and the fresh snapshot price
     (falling back to the artifact price when the snapshot lacks the item).
+    fresh_flow is the item's recent overall daily flow, used for sizing
+    only when a window has no observed flow of its own.
     """
     buy_doy = tuple(pick["buy_doy"])
     sell_doy = tuple(pick["sell_doy"])
@@ -139,8 +164,11 @@ def enrich(pick, today, fresh_price=None):
     dtb = 0 if in_buy else (b0 - today).days
     left = (b1 - today).days if in_buy else None
     window_len = (b1 - b0).days + 1
+    flow, flow_est = sizing_flow(pick, "buy", fresh_flow)
+    sell_flow, _ = sizing_flow(pick, "sell", fresh_flow)
     qty = suggested_qty(
-        pick.get("window_flow"), left if in_buy else window_len, limit
+        flow, left if in_buy else window_len, limit,
+        sell_flow, (s1 - s0).days + 1,
     )
 
     if in_buy and limit is not None and price is not None and price <= limit:
@@ -163,6 +191,10 @@ def enrich(pick, today, fresh_price=None):
         entry_premium=prem,
         limit_price=limit,
         suggested_qty=qty,
+        flow_used=flow,
+        flow_estimated=flow_est,
+        buy_window=f"{_fmt(b0)} - {_fmt(b1)}",
+        sell_window=f"{_fmt(s0)} - {_fmt(s1)}",
         buy_opens=b0.isoformat(),
         buy_closes=b1.isoformat(),
         sell_opens=s0.isoformat(),
