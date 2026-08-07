@@ -7,6 +7,10 @@ units, and which festival runs next. Pure stdlib, computed at report build
 time so the answers track the fresh snapshot rather than the weekly
 artifact.
 
+Windows of event-linked picks follow the festival's announced run for the
+year, the same anchoring past cycles get, and fall back to the typical
+day-of-year span while the year's dates are unconfirmed.
+
 The pay-up-to ceiling is the price at which selling at the recent median
 sell-window price still nets RETURN_HURDLE after fees; a current price
 above it means the cheap entry is gone regardless of how good the pattern
@@ -17,9 +21,8 @@ entry-premium basis in season/compute.py.
 from datetime import date, timedelta
 from statistics import median
 
-from season import events
+from season import cycles, events
 from season.cycles import TAX
-from season.score import days_to_buy
 
 RETURN_HURDLE = 0.20  # net return demanded at the recent median sell price
 RECENT_CYCLES = 3  # price basis; old cycles carry pre-inflation prices
@@ -66,6 +69,26 @@ def span_dates(today, span_doy):
     return start, start + timedelta(days=length)
 
 
+def anchored_span(today, span_doy, event=None):
+    """(start, end, anchored) of the current or next occurrence of a span.
+
+    Event-linked spans follow the announced run of their festival, shifted
+    by the same offset cycles.cycle_windows applies to past years, so an
+    early Halloween moves its buy window with it. Years the festival has
+    not been announced for fall back to the typical day-of-year span.
+    """
+    if event:
+        anchor = events.typical_span(event)[0]
+        for year in (today.year - 1, today.year, today.year + 1):
+            run = events.year_span(event, year)
+            if run is None:
+                continue
+            start, end = cycles.anchor_dates(span_doy, anchor, run[0])
+            if end >= today:
+                return start, end, True
+    return span_dates(today, span_doy) + (False,)
+
+
 def recent_median(cyc, key):
     vals = [c[key] for c in cyc[-RECENT_CYCLES:]]
     return median(vals) if vals else None
@@ -99,22 +122,23 @@ def enrich(pick, today, fresh_price=None):
 
     Mutates and returns the pick. The artifact's stored days_to_buy,
     entry_premium and cur_price go up to a week stale between season runs;
-    everything here is recomputed from buy_doy/sell_doy, the cycles
-    evidence and the fresh snapshot price (falling back to the artifact
-    price when the snapshot lacks the item).
+    everything here is recomputed from buy_doy/sell_doy anchored to the
+    festival calendar, the cycles evidence and the fresh snapshot price
+    (falling back to the artifact price when the snapshot lacks the item).
     """
     buy_doy = tuple(pick["buy_doy"])
     sell_doy = tuple(pick["sell_doy"])
     cyc = pick["cycles"]
     price = fresh_price or pick.get("cur_price")
-    b0, b1 = span_dates(today, buy_doy)
-    s0, s1 = span_dates(today, sell_doy)
+    event = pick.get("event")
+    b0, b1, _ = anchored_span(today, buy_doy, event)
+    s0, s1, _ = anchored_span(today, sell_doy, event)
     limit = limit_price(cyc)
     prem = entry_premium(price, cyc)
-    dtb = days_to_buy(today, buy_doy)
-    in_buy = dtb == 0
+    in_buy = b0 <= today <= b1
+    dtb = 0 if in_buy else (b0 - today).days
     left = (b1 - today).days if in_buy else None
-    window_len = (buy_doy[1] - buy_doy[0]) % 365 + 1
+    window_len = (b1 - b0).days + 1
     qty = suggested_qty(
         pick.get("window_flow"), left if in_buy else window_len, limit
     )
@@ -124,7 +148,7 @@ def enrich(pick, today, fresh_price=None):
     elif in_buy:
         over = f"{prem:+.0%} over trough" if prem and prem > 0 else "over the ceiling"
         bucket, verdict = "dormant", f"too late: {over}"
-    elif in_span(today, sell_doy):
+    elif s0 <= today <= s1:
         bucket, verdict = "sell_active", f"sell window, closes {_fmt(s1)}"
     elif dtb <= OPENS_SOON_DAYS:
         bucket, verdict = "opens_soon", f"opens {_fmt(b0)} ({dtb}d)"

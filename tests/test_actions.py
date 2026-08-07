@@ -72,6 +72,39 @@ def test_span_dates_next_occurrence():
     assert d0 == date(2027, 9, 7)
 
 
+def test_anchored_span_follows_the_announced_run():
+    # Four Winds runs Aug 11 in 2026 against a typical Jul 31 start, so a
+    # window sitting 15 days before the typical start moves with it.
+    span = actions.anchored_span(
+        date(2026, 8, 7), (197, 224), "Festival of the Four Winds"
+    )
+    assert span == (date(2026, 7, 27), date(2026, 8, 23), True)
+
+
+def test_anchored_span_falls_back_when_unannounced():
+    today = date(2026, 8, 7)
+    span_doy = (289, 310)
+    start, end, anchored = actions.anchored_span(today, span_doy, "Halloween")
+    assert not anchored  # the 2026 run is not in the calendar yet
+    assert (start, end) == actions.span_dates(today, span_doy)
+
+
+def test_anchored_span_ignores_a_run_already_over():
+    # Lunar New Year 2026 ended in February and 2027 is unannounced.
+    today = date(2026, 8, 7)
+    span_doy = (20, 41)
+    start, end, anchored = actions.anchored_span(today, span_doy, "Lunar New Year")
+    assert not anchored
+    assert (start, end) == actions.span_dates(today, span_doy)
+
+
+def test_anchored_span_without_an_event():
+    today = date(2026, 8, 20)
+    assert actions.anchored_span(today, (250, 270)) == (
+        date(2026, 9, 7), date(2026, 9, 27), False
+    )
+
+
 # --- verdicts ---------------------------------------------------------------
 
 
@@ -122,6 +155,36 @@ def test_enrich_prefers_fresh_price():
     p = actions.enrich(_pick(cur_price=300), date(2026, 9, 10), fresh_price=100)
     assert p["bucket"] == "buy_now"
     assert p["cur_price"] == 100
+
+
+def test_enrich_delays_a_buy_to_the_announced_run():
+    # Typical Four Winds dates put this window at Jul 30 - Aug 26, but the
+    # 2026 run starts 11 days late, so Aug 07 is not a buy yet.
+    p = actions.enrich(
+        _pick(event="Festival of the Four Winds", buy_doy=[211, 238]),
+        date(2026, 8, 7),
+    )
+    assert p["buy_opens"] == "2026-08-10"
+    assert p["buy_closes"] == "2026-09-06"
+    assert p["bucket"] == "opens_soon"
+    assert p["days_to_buy"] == 3
+
+
+def test_enrich_anchors_the_sell_window():
+    p = actions.enrich(
+        _pick(event="Festival of the Four Winds",
+              buy_doy=[100, 120], sell_doy=[212, 233]),
+        date(2026, 8, 30),
+    )
+    assert p["sell_opens"] == "2026-08-11"  # typical span says Jul 31
+    assert p["bucket"] == "sell_active"
+    assert p["verdict"] == "sell window, closes Sep 01"
+
+
+def test_enrich_keeps_typical_dates_while_unannounced():
+    p = actions.enrich(_pick(event="Halloween", buy_doy=[211, 238]), date(2026, 8, 7))
+    assert p["buy_opens"] == "2026-07-30"
+    assert p["bucket"] == "buy_now"
 
 
 def test_act_orders_buckets_before_score():
