@@ -11,7 +11,8 @@ Near-zero-budget design: data collection runs on GitHub Actions cron, price hist
 - `collector/` polls the GW2 commerce API on a schedule
 - `db/` snapshot storage, schema, compaction
 - `features/` velocity, fill time, undercut rate, book depth
-- `scorers/` flip EV ranking and seasonal signals
+- `scorers/` flip EV ranking
+- `season/` seasonal decomposition, event calendar, cycle returns
 - `report/` daily HTML/CLI report
 - `account/` your own trading results, needs an API key
 - `archive/` preserved third-party data, see its README for provenance
@@ -40,7 +41,7 @@ Snapshots are local and git-ignored.
 
 ## Daily report
 
-The flip shortlist publishes to [petrcala.github.io/gw2-advisor](https://petrcala.github.io/gw2-advisor/) daily (04:10 UTC, plus GitHub cron jitter). Trigger an off-schedule rebuild anytime with `gh workflow run report.yml`. Build it locally without AWS access:
+The flip shortlist publishes to [petrcala.github.io/gw2-advisor](https://petrcala.github.io/gw2-advisor/) daily (04:10 UTC, plus GitHub cron jitter). A second table lists speculative seasonal picks (buy window, sell window, and the return of every past cycle), recomputed weekly by season.yml from the multi-year history. Trigger an off-schedule rebuild anytime with `gh workflow run report.yml`. Build it locally without AWS access:
 
 ```
 pip install -r collector/requirements.txt
@@ -49,7 +50,7 @@ python -m report.build --local
 
 ## Status
 
-M3 (depth-aware daily flip report). See [docs/ROADMAP.md](docs/ROADMAP.md) and the issue tracker.
+M4 (seasonality + event calendar). See [docs/ROADMAP.md](docs/ROADMAP.md) and the issue tracker.
 
 ## Compliance
 

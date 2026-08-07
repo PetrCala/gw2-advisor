@@ -29,7 +29,7 @@ def load_events(store, days=3):
 
     rows = []
     for key in store.list_keys("compact/")[-days:]:
-        body = store.s3.get_object(Bucket=store.bucket, Key=key)["Body"].read()
+        body = store.get_bytes(key)
         t = pq.read_table(io.BytesIO(body), columns=["ts", "item_id", "buy", "sell"])
         ts = t["ts"].cast("int64").to_pylist()  # timestamp[s] casts to epoch seconds
         item = t["item_id"].to_pylist()

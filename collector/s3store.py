@@ -40,14 +40,20 @@ class Store:
             keys.extend(obj["Key"] for obj in page.get("Contents", []))
         return sorted(keys)
 
-    def get_json_gz(self, key):
-        """Return the decoded object, or None if the key does not exist."""
+    def get_bytes(self, key):
+        """Return the raw object bytes, or None if the key does not exist."""
         try:
-            body = self.s3.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+            return self.s3.get_object(Bucket=self.bucket, Key=key)["Body"].read()
         except ClientError as e:
             if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
                 return None
             raise
+
+    def get_json_gz(self, key):
+        """Return the decoded object, or None if the key does not exist."""
+        body = self.get_bytes(key)
+        if body is None:
+            return None
         return json.loads(gzip.decompress(body))
 
     def put_json_gz(self, key, payload):

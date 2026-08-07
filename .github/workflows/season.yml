@@ -1,0 +1,42 @@
+name: season
+
+# Weekly seasonal decomposition over history/dw2/ into season/latest.json.gz,
+# which the daily report renders as the speculative picks table. Single AWS
+# job with no environment: on purpose; an environment-scoped OIDC sub claim
+# would be rejected by the AWS role trust (see report.yml).
+
+on:
+  schedule:
+    - cron: "20 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      max_candidates:
+        description: "cap on items decomposed, empty for the default"
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: season
+
+jobs:
+  season:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: collector/requirements-season.txt
+      - run: pip install -r collector/requirements-season.txt
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: python -m season.compute ${{ inputs.max_candidates }}
+        env:
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
