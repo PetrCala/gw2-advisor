@@ -19,7 +19,7 @@ from pathlib import Path
 
 from collector import dw2, gw2api
 from features import reprice
-from scorers import flip
+from scorers import flip, flip_actions
 from season import actions as season_actions
 from season import score as season_score
 
@@ -44,6 +44,10 @@ CSV_COLS = [
     "outbid_day",
     "undercut_day",
     "exit_pct",
+    "break_even_sell",
+    "bail_price",
+    "bucket",
+    "verdict",
     "confidence",
 ]
 
@@ -158,6 +162,14 @@ ASSUMPTIONS = {
     "as penny wars",
     "exit": "exit % is the loss per unit if the whole lot were dumped into "
     "the current buy book right after purchase",
+    "exit_prices": "list at sell_at; if the ask falls, keep relisting down to "
+    "break-even (recovers the buy order after fees); below the bail price "
+    "(where relisting nets less than dumping the lot right now), dump instead",
+    "verdict": f"act now needs margin {flip_actions.ACT_MARGIN_PCT:.0%}+ of cost, "
+    "at least medium confidence, and a calm book (reprice rate under "
+    f"{flip_actions.REPRICE_CAUTION_PER_DAY:g}/day, exit floor above "
+    f"{flip_actions.THIN_EXIT_PCT:.0%}); one miss is caution, two or more "
+    "(or no reprice data to check the book with) is skip today",
 }
 
 
@@ -458,6 +470,7 @@ td a:hover { text-decoration: underline; }
 .v-buy_now { color: #7ec97f; } .v-opens_soon { color: #e0c068; }
 .v-sell_active { color: #8ab4f8; } .v-dormant { color: #8a8f9c; }
 .exit-risk { color: #e06c75; font-weight: 600; }
+.v-act_now { color: #7ec97f; } .v-caution { color: #e0c068; } .v-skip_today { color: #8a8f9c; }
 .queue { background: #1b1e25; border: 1px solid #3a3f4b; border-radius: 6px;
          padding: 4px 16px 10px; margin: 12px 0 20px; }
 .queue h3 { font-size: 14px; margin: 10px 0 2px; color: #aab0bd; }
@@ -482,11 +495,12 @@ Generated __GENERATED__ &middot; prices as of __PRICES__ &middot; __SCANNED__ it
 <tbody></tbody>
 </table>
 <div class="notes">
-<p>Ranked by EV/day: after-fee margin over the estimated per-unit round-trip
-time at our assumed share of traded flow. Buy order and sell listing are the
-orders you place; best bid and best ask are where the book sits right now, so
-the gap between the two pairs is how far your orders are from the market.
-Model assumptions:</p>
+<p>Sorted by verdict: act now first, then caution, then skip today (click
+EV/day to rank by expected profit instead). Buy order and sell listing are
+the orders you place; best bid and best ask are where the book sits right
+now, so the gap between the two pairs is how far your orders are from the
+market. Break-even and bail are exit prices: list at sell_at, relist down
+to break-even, dump below bail. Model assumptions:</p>
 <ul>__ASSUMPTIONS__</ul>
 <p>Estimates from public data; spreads can close before you act. Check the
 live order book in game before committing gold. Item links go to gw2bltc
@@ -519,8 +533,11 @@ rows as anecdotes, not patterns.</p>
 <script>
 var cols = [
   {key: "name", label: "Item", str: true},
+  {key: "verdict", label: "Verdict", str: true},
   {key: "buy_at", label: "Buy order", money: true},
   {key: "sell_at", label: "Sell listing", money: true},
+  {key: "break_even_sell", label: "Break-even", money: true},
+  {key: "bail_price", label: "Bail", money: true},
   {key: "best_bid", label: "Best bid", money: true},
   {key: "best_ask", label: "Best ask", money: true},
   {key: "margin", label: "Margin", money: true},
@@ -633,7 +650,7 @@ function makeTable(id, rows, cols, sortKey) {
   }
   render();
 }
-makeTable("t", __ROWS__, cols, "ev_day");
+makeTable("t", __ROWS__, cols, "act");
 var srows = __SEASONAL_ROWS__;
 if (srows.length) makeTable("t2", srows, scols, "act");
 else document.getElementById("t2").style.display = "none";

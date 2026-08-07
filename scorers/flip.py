@@ -20,6 +20,7 @@ buy_quantity, sell_quantity overwritten from our own fresher collector state.
 """
 
 from features import book
+from scorers import flip_actions
 
 TAX = 0.15
 CAPTURE = 0.25
@@ -119,7 +120,10 @@ def rescore(pick, item_book, rates):
     budget and within MAX_WALK_PCT of the touch, adds the queue wait to the
     round trip, drops penny-war items (rates = (outbids/day, undercuts/day)
     or None when we lack delta history), and marks the instant-exit floor
-    from dumping the lot into the buy book.
+    from dumping the lot into the buy book. Also attaches the exit prices
+    and action verdict from scorers.flip_actions: break_even_sell and
+    bail_price to act on as the listing ages, bucket/verdict for the
+    at-a-glance read, and act as the report's default sort key.
     """
     buys, sells = item_book.get("buys"), item_book.get("sells")
     if not buys or not sells:
@@ -159,8 +163,13 @@ def rescore(pick, item_book, rates):
         return None
     rt_days = wait_days + qty * fill_days_per_unit
 
-    dump_net = book.dump_value(buys, qty) * (1 - TAX)
-    exit_pct = (dump_net / qty - buy_at) / buy_at
+    dump_net_per_unit = book.dump_value(buys, qty) * (1 - TAX) / qty
+    exit_pct = (dump_net_per_unit - buy_at) / buy_at
+    ev_day = margin * qty / rt_days
+
+    bucket, verdict = flip_actions.verdict(
+        margin / buy_at, pick["confidence"], exit_pct, outbid, undercut
+    )
 
     out = dict(pick)
     out.update(
@@ -173,9 +182,14 @@ def rescore(pick, item_book, rates):
         qty=qty,
         capital=qty * buy_at,
         round_trip_days=rt_days,
-        ev_day=margin * qty / rt_days,
+        ev_day=ev_day,
         outbid_day=None if outbid is None else round(outbid, 1),
         undercut_day=None if undercut is None else round(undercut, 1),
         exit_pct=exit_pct,
+        break_even_sell=flip_actions.break_even_sell(buy_at, TAX),
+        bail_price=flip_actions.bail_price(dump_net_per_unit, TAX),
+        bucket=bucket,
+        verdict=verdict,
+        act=flip_actions.act_score(bucket, ev_day),
     )
     return out
