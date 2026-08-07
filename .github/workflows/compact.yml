@@ -44,3 +44,4 @@ jobs:
         run: |
           gh api -X PUT "repos/${{ github.repository }}/actions/workflows/collect.yml/enable"
           gh api -X PUT "repos/${{ github.repository }}/actions/workflows/compact.yml/enable"
+          gh api -X PUT "repos/${{ github.repository }}/actions/workflows/season.yml/enable"

@@ -19,6 +19,7 @@ from pathlib import Path
 from collector import dw2, gw2api
 from features import reprice
 from scorers import flip
+from season import score as season_score
 
 SITE = Path(__file__).resolve().parent.parent / "site"
 
@@ -41,6 +42,45 @@ CSV_COLS = [
     "exit_pct",
     "confidence",
 ]
+
+SEASONAL_CSV_COLS = [
+    "id",
+    "name",
+    "rarity",
+    "event",
+    "buy_window",
+    "sell_window",
+    "hold_days",
+    "days_to_buy",
+    "n_cycles",
+    "med_ret",
+    "hit_rate",
+    "worst_ret",
+    "last_ret",
+    "strength",
+    "cur_price",
+    "entry_premium",
+    "window_flow",
+    "confidence",
+    "score",
+    "cycles",
+]
+
+SEASONAL_ASSUMPTIONS = {
+    "decomposition": "STL (period 52, robust) on weekly log sell prices over "
+    "up to 8 years of daily history, refreshed weekly",
+    "windows": "buy window brackets the seasonal trough, sell window the peak; "
+    "event-linked items track each year's actual festival dates",
+    "returns": "per cycle: buy at the median daily price inside the buy window, "
+    "sell at the median inside the sell window, net of 15% fees; cycles missing "
+    "observed prices in either window are dropped, not guessed",
+    "filters": f"at least {season_score.MIN_CYCLES} completed cycles, "
+    f"median return {season_score.MIN_MEDIAN_RET:.0%}, "
+    f"hit rate {season_score.MIN_HIT_RATE:.0%}, "
+    f"seasonal strength {season_score.MIN_STRENGTH:g} or better",
+    "ranking": "score = median return times hit rate, damped below 6 cycles; "
+    "high confidence needs 6+ cycles, an 80% hit rate and a positive latest cycle",
+}
 
 ASSUMPTIONS = {
     "placement": "prices walked into order-book gaps, accepting at most "
@@ -98,15 +138,27 @@ def main():
     picks.sort(key=lambda s: s["ev_day"], reverse=True)
     picks = picks[: flip.TOP_N]
 
+    seasonal = None
+    if not local:
+        try:  # seasonal picks refine the page, they don't gate it
+            seasonal = store.get_json_gz("season/latest.json.gz")
+        except Exception as e:
+            print(f"seasonal picks unavailable: {e}")
+
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    write_site(picks, scanned=len(snap), generated=generated, price_ts=price_ts)
+    write_site(
+        picks, scanned=len(snap), generated=generated, price_ts=price_ts,
+        seasonal=seasonal,
+    )
+    n_seasonal = len(seasonal["picks"]) if seasonal else 0
     print(
         f"{len(picks)} picks from {len(shortlist)} shortlisted of {len(snap)} items "
-        f"(reprice rates: {'yes' if rates else 'no'}) -> {SITE / 'index.html'}"
+        f"(reprice rates: {'yes' if rates else 'no'}, "
+        f"seasonal picks: {n_seasonal}) -> {SITE / 'index.html'}"
     )
 
 
-def write_site(picks, scanned, generated, price_ts):
+def write_site(picks, scanned, generated, price_ts, seasonal=None):
     SITE.mkdir(exist_ok=True)
 
     payload = {
@@ -115,6 +167,7 @@ def write_site(picks, scanned, generated, price_ts):
         "scanned": scanned,
         "assumptions": ASSUMPTIONS,
         "picks": picks,
+        "seasonal": seasonal,
     }
     (SITE / "data.json").write_text(json.dumps(payload, indent=1), encoding="utf-8")
 
@@ -124,13 +177,35 @@ def write_site(picks, scanned, generated, price_ts):
         for p in picks:
             w.writerow({k: p[k] for k in CSV_COLS})
 
+    spicks = (seasonal or {}).get("picks") or []
+    with open(SITE / "seasonal.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=SEASONAL_CSV_COLS)
+        w.writeheader()
+        for p in spicks:
+            row = {k: p[k] for k in SEASONAL_CSV_COLS if k != "cycles"}
+            row["cycles"] = season_score.fmt_cycles(p["cycles"])
+            w.writerow(row)
+
+    if seasonal:
+        smeta = (
+            f"computed {seasonal['generated'][:10]} from history through "
+            f"{seasonal['history_through']} &middot; {len(spicks)} picks of "
+            f"{seasonal['items_decomposed']:,} decomposed"
+        )
+    else:
+        smeta = "no seasonal artifact yet; the weekly season workflow fills this in"
+
     html = TEMPLATE
     html = html.replace("__ROWS__", json.dumps(picks))
+    html = html.replace("__SEASONAL_ROWS__", json.dumps(spicks))
+    html = html.replace("__SEASONAL_META__", smeta)
     html = html.replace("__GENERATED__", generated)
     html = html.replace("__PRICES__", price_ts or "datawars2 mirror (up to ~1h old)")
     html = html.replace("__SCANNED__", f"{scanned:,}")
     assumptions = "".join(f"<li>{v}</li>" for v in ASSUMPTIONS.values())
     html = html.replace("__ASSUMPTIONS__", assumptions)
+    sassumptions = "".join(f"<li>{v}</li>" for v in SEASONAL_ASSUMPTIONS.values())
+    html = html.replace("__SEASONAL_ASSUMPTIONS__", sassumptions)
     (SITE / "index.html").write_text(html, encoding="utf-8")
 
 
@@ -145,6 +220,7 @@ TEMPLATE = """<!doctype html>
 body { background: #16181d; color: #d6d8de; font: 14px/1.5 system-ui, sans-serif;
        margin: 0 auto; max-width: 1080px; padding: 24px 16px 48px; }
 h1 { font-size: 20px; margin: 0 0 4px; }
+h2 { font-size: 17px; margin: 36px 0 4px; }
 .meta { color: #8a8f9c; font-size: 13px; margin-bottom: 16px; }
 .meta a { color: #8ab4f8; }
 table { border-collapse: collapse; width: 100%; }
@@ -153,6 +229,8 @@ th { cursor: pointer; user-select: none; color: #aab0bd; border-bottom: 1px soli
      position: sticky; top: 0; background: #16181d; }
 th.active { color: #fff; }
 td:nth-child(2), th:nth-child(2) { text-align: left; }
+#t2 td:nth-child(3), #t2 th:nth-child(3), #t2 td:nth-child(4), #t2 th:nth-child(4),
+#t2 td:nth-child(5), #t2 th:nth-child(5) { text-align: left; }
 tbody tr:nth-child(odd) { background: #1b1e25; }
 tbody tr:hover { background: #232733; }
 td a { color: inherit; text-decoration: none; }
@@ -184,8 +262,26 @@ time at our assumed share of traded flow. Model assumptions:</p>
 live order book in game before committing gold. Item links go to gw2bltc
 for a second opinion.</p>
 </div>
+<h2>Speculative seasonal picks</h2>
+<div class="meta">
+__SEASONAL_META__ &middot; <a href="seasonal.csv">csv</a>
+</div>
+<table id="t2">
+<thead><tr></tr></thead>
+<tbody></tbody>
+</table>
+<div class="notes">
+<p>Buy-and-hold candidates from multi-year seasonality, ranked by score
+(median past-cycle return times hit rate, damped for thin samples). The
+cycles column counts positive past cycles; hover it for every year's
+return. Model assumptions:</p>
+<ul>__SEASONAL_ASSUMPTIONS__</ul>
+<p>Speculative by nature: capital sits locked for weeks, and expansion
+launches reprice whole material classes (cycles overlapping one are
+labeled in the hover). Few cycles mean wide error bars; treat low-cycle
+rows as anecdotes, not patterns.</p>
+</div>
 <script>
-var rows = __ROWS__;
 var cols = [
   {key: "name", label: "Item", str: true},
   {key: "buy_at", label: "Buy at", money: true},
@@ -203,7 +299,24 @@ var cols = [
   {key: "ev_day", label: "EV/day", money: true},
   {key: "confidence", label: "Conf", str: true}
 ];
-var sortKey = "ev_day", sortAsc = false;
+var scols = [
+  {key: "name", label: "Item", str: true},
+  {key: "event", label: "Event", str: true},
+  {key: "buy_window", label: "Buy", str: true},
+  {key: "sell_window", label: "Sell", str: true},
+  {key: "n_cycles", label: "Cycles"},
+  {key: "med_ret", label: "Med ret", pct: true},
+  {key: "worst_ret", label: "Worst", pct: true},
+  {key: "last_ret", label: "Last", pct: true},
+  {key: "hit_rate", label: "Hit", pct: true},
+  {key: "hold_days", label: "Hold d"},
+  {key: "days_to_buy", label: "Buy in d"},
+  {key: "entry_premium", label: "Entry", pct: true},
+  {key: "cur_price", label: "Price", money: true},
+  {key: "window_flow", label: "Flow/d"},
+  {key: "confidence", label: "Conf", str: true},
+  {key: "score", label: "Score"}
+];
 
 function esc(s) {
   return String(s).replace(/[&<>"]/g, function (c) {
@@ -225,40 +338,57 @@ function cell(r, c) {
       r.id + '" title="' + esc(r.rarity) + '">' + esc(v) + "</a>";
   if (c.key === "confidence")
     return '<span class="conf-' + esc(v) + '">' + esc(v) + "</span>";
+  if (c.key === "n_cycles" && r.cycles) {
+    var up = 0, tip = [];
+    r.cycles.forEach(function (x) {
+      if (x.ret > 0) up++;
+      tip.push(x.year + " " + (x.ret >= 0 ? "+" : "") + Math.round(100 * x.ret) +
+        "%" + (x.release ? " (" + x.release + ")" : ""));
+    });
+    return '<span title="' + esc(tip.join(", ")) + '">' + up + "/" + v + " up</span>";
+  }
   if (c.money) return money(v);
   if (c.pct) return (100 * v).toFixed(1) + "%";
   if (c.days) return v < 1 ? Math.round(v * 24) + "h" : v.toFixed(1) + "d";
   return v.toLocaleString();
 }
-function render() {
-  var sorted = rows.slice().sort(function (a, b) {
-    var x = a[sortKey], y = b[sortKey];
-    if (x === null || x === undefined) x = -Infinity;
-    if (y === null || y === undefined) y = -Infinity;
-    var d = typeof x === "string" ? x.localeCompare(y) : x - y;
-    return sortAsc ? d : -d;
-  });
-  var head = "<th>#</th>" + cols.map(function (c) {
-    var cls = c.key === sortKey ? ' class="active"' : "";
-    var arrow = c.key === sortKey ? (sortAsc ? " \\u2191" : " \\u2193") : "";
-    return "<th" + cls + ' data-key="' + c.key + '">' + c.label + arrow + "</th>";
-  }).join("");
-  document.querySelector("thead tr").innerHTML = head;
-  document.querySelector("tbody").innerHTML = sorted.map(function (r, i) {
-    return "<tr><td>" + (i + 1) + "</td>" + cols.map(function (c) {
-      return "<td>" + cell(r, c) + "</td>";
-    }).join("") + "</tr>";
-  }).join("");
-  document.querySelectorAll("th[data-key]").forEach(function (th) {
-    th.onclick = function () {
-      var k = th.getAttribute("data-key");
-      if (k === sortKey) sortAsc = !sortAsc;
-      else { sortKey = k; sortAsc = false; }
-      render();
-    };
-  });
+function makeTable(id, rows, cols, sortKey) {
+  var sortAsc = false;
+  var table = document.getElementById(id);
+  function render() {
+    var sorted = rows.slice().sort(function (a, b) {
+      var x = a[sortKey], y = b[sortKey];
+      if (x === null || x === undefined) x = -Infinity;
+      if (y === null || y === undefined) y = -Infinity;
+      var d = typeof x === "string" ? x.localeCompare(y) : x - y;
+      return sortAsc ? d : -d;
+    });
+    var head = "<th>#</th>" + cols.map(function (c) {
+      var cls = c.key === sortKey ? ' class="active"' : "";
+      var arrow = c.key === sortKey ? (sortAsc ? " \\u2191" : " \\u2193") : "";
+      return "<th" + cls + ' data-key="' + c.key + '">' + c.label + arrow + "</th>";
+    }).join("");
+    table.querySelector("thead tr").innerHTML = head;
+    table.querySelector("tbody").innerHTML = sorted.map(function (r, i) {
+      return "<tr><td>" + (i + 1) + "</td>" + cols.map(function (c) {
+        return "<td>" + cell(r, c) + "</td>";
+      }).join("") + "</tr>";
+    }).join("");
+    table.querySelectorAll("th[data-key]").forEach(function (th) {
+      th.onclick = function () {
+        var k = th.getAttribute("data-key");
+        if (k === sortKey) sortAsc = !sortAsc;
+        else { sortKey = k; sortAsc = false; }
+        render();
+      };
+    });
+  }
+  render();
 }
-render();
+makeTable("t", __ROWS__, cols, "ev_day");
+var srows = __SEASONAL_ROWS__;
+if (srows.length) makeTable("t2", srows, scols, "score");
+else document.getElementById("t2").style.display = "none";
 </script>
 </body>
 </html>

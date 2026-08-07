@@ -56,8 +56,13 @@ Report (report.yml, daily 04:10 UTC after compaction, dispatchable on demand): G
 - Undercut/outbid rates (`features/reprice.py`): per-item 1-2c best-price moves per day, counted from our own delta snapshots (compact/ parquet plus today's raw). Items above 150 combined reprices/day are dropped as penny wars. Needs delta history in S3, so the columns stay empty in `--local` builds.
 - Deferred: feeding per-item reprice rates back into the capture assumption (waits for a few weeks of delta history).
 
-### M4: seasonality + event calendar
+### M4: seasonality + event calendar (done)
 
-- Seasonal decomposition (STL) on multi-year price/volume series.
-- Event calendar from the wiki: Wintersday, Halloween, SAB, Lunar New Year, patch/expansion dates.
-- Output per candidate: buy window, sell window, historical return per past cycle.
+Decisions:
+
+- Python with statsmodels STL, not R. The R option stays closed unless the modeling outgrows STL.
+- Static event calendar checked into the repo (`season/events.py`): per-year run dates for Wintersday, Halloween, Super Adventure Festival, Lunar New Year, Dragon Bash, and Festival of the Four Winds, hand-copied from the wiki, plus expansion launch dates. Festivals shift dates yearly, so event-linked candidates anchor their windows to each year's actual dates.
+- Heavy computation runs in its own weekly workflow (season.yml, Mondays 03:20 UTC, dispatchable): streams all `history/dw2/` chunks, filters rows against a snapshot-derived candidate set (liquidity and price floors, capped at 4000 items so runtime stays well inside the 1-hour OIDC session), and writes a ~10 KB `season/latest.json.gz`. The daily report reads only that artifact, non-fatally, so the report never blocks on seasonality.
+- Pipeline per item: daily sell prices (pre-2019 rows carry only min/max extremes, so their midpoint fills in), weekly log-price resample, STL (period 52, robust) over the last 8 years, buy window at the seasonal trough and sell window at the peak, then the realized return of every completed past cycle: buy at the median observed price in the buy window, sell at the median in the sell window, net of the 15% cut. Cycles missing observed prices in either window are dropped, not guessed, which handles the sparse 2014-15 mirror era and young items honestly.
+- Evidence-first display: the report's second table shows cycle count, per-year returns (hover), hit rate, worst and latest cycle, and expansion launches that overlapped a cycle, so a 3-cycle pattern is visibly weaker than a 12-cycle festival cycle. Score = median return times hit rate, damped below 6 cycles.
+- gw2profits forge/salvage conversion paths stay out of scope; the archived recipes remain available for a later milestone.
