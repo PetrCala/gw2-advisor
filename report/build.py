@@ -474,6 +474,7 @@ td a:hover { text-decoration: underline; }
 <div class="meta">
 Generated __GENERATED__ &middot; prices as of __PRICES__ &middot; __SCANNED__ items scanned
 &middot; <a href="data.csv">csv</a> &middot; <a href="data.json">json</a>
+&middot; <a href="track.html">track record</a>
 &middot; <a href="https://github.com/PetrCala/gw2-advisor">source</a>
 </div>
 <table id="t">

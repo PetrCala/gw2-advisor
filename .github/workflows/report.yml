@@ -45,6 +45,11 @@ jobs:
           S3_BUCKET: ${{ vars.S3_BUCKET }}
           GH_TOKEN: ${{ github.token }}
           TRADE_ACTIONS_ISSUE: "20"
+      # Paper trading scores the picks; like notify, it never gates the deploy.
+      - run: python -m report.track
+        continue-on-error: true
+        env:
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
