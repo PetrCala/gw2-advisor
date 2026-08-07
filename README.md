@@ -48,6 +48,8 @@ pip install -r collector/requirements.txt
 python -m report.build --local
 ```
 
+Seasonal queue transitions (a pick becomes a buy, opens soon, hits its sell window, or stops being a buy) are posted as comments on [issue #20](https://github.com/PetrCala/gw2-advisor/issues/20); subscribe to that issue for free email/push notifications. The same events publish as an RSS feed at [feed.xml](https://petrcala.github.io/gw2-advisor/feed.xml).
+
 ## Status
 
 M4 (seasonality + event calendar). See [docs/ROADMAP.md](docs/ROADMAP.md) and the issue tracker.

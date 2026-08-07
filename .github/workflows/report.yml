@@ -14,6 +14,7 @@ permissions:
   id-token: write
   contents: read
   pages: write
+  issues: write  # notify comments transitions on the trade-actions issue
 
 concurrency:
   group: report
@@ -37,6 +38,13 @@ jobs:
       - run: python -m report.build
         env:
           S3_BUCKET: ${{ vars.S3_BUCKET }}
+      # Notifications refine the report, they don't gate it.
+      - run: python -m report.notify
+        continue-on-error: true
+        env:
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
+          GH_TOKEN: ${{ github.token }}
+          TRADE_ACTIONS_ISSUE: "20"
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
