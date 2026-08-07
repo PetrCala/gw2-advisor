@@ -22,6 +22,35 @@ def test_sell_price_mirrors():
     assert book.choose_sell_price(SELLS, 100_000, 0.25) == 115
 
 
+# A thin crowd at the touch sitting under a wide gap: the shape that made the
+# walk run off the top of the book and price at a level nothing trades at.
+GAPPED_SELLS = [[880, 27], [882, 4], [982, 79], [1067, 278], [1500, 40000]]
+
+
+def test_sell_price_stops_at_the_price_bound_not_the_gap():
+    # 9195/day tolerates ~2300 queued, more than the 388 units under 1067, so
+    # the wait budget alone walks to 1499. A 2% bound holds it beside the touch.
+    assert book.choose_sell_price(GAPPED_SELLS, 9195, 0.25) == 1499
+    assert book.choose_sell_price(GAPPED_SELLS, 9195, 0.25, 880 * 1.02) == 881
+
+
+def test_buy_price_stops_at_the_price_bound():
+    # 100k/day would walk to 95; a bound of 99 leaves only the 100 level.
+    assert book.choose_buy_price(BUYS, 100_000, 0.25, 99) is not None
+    assert book.choose_buy_price(BUYS, 100_000, 0.25, 99) == 101
+
+
+def test_bound_looser_than_the_book_changes_nothing():
+    assert book.choose_buy_price(BUYS, 100_000, 0.25, 0) == 95
+    assert book.choose_sell_price(SELLS, 100_000, 0.25, 10_000) == 115
+
+
+def test_best_price_is_allowed_even_inside_the_bound():
+    # A bound tighter than one tick still leaves the front of the queue.
+    assert book.choose_buy_price(BUYS, 100_000, 0.25, 101) == 101
+    assert book.choose_sell_price(SELLS, 100_000, 0.25, 109) == 109
+
+
 def test_empty_book_side():
     assert book.choose_buy_price([], 1000, 0.25) is None
     assert book.choose_sell_price([], 1000, 0.25) is None

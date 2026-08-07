@@ -31,6 +31,8 @@ CSV_COLS = [
     "rarity",
     "buy_at",
     "sell_at",
+    "best_bid",
+    "best_ask",
     "margin",
     "margin_pct",
     "qty",
@@ -132,8 +134,11 @@ SEASONAL_ASSUMPTIONS = {
 }
 
 ASSUMPTIONS = {
-    "placement": "prices walked into order-book gaps, accepting at most "
-    f"{flip.WAIT_TOLERANCE_DAYS:g} days of queue ahead of us per side",
+    "placement": "buy order and sell listing are the prices you place, not the "
+    "market: walked into order-book gaps, accepting at most "
+    f"{flip.WAIT_TOLERANCE_DAYS:g} days of queue ahead of us per side and never "
+    f"further than {flip.MAX_WALK_PCT:.0%} off the touch, since new orders keep "
+    "arriving between us and the best price",
     "fees": "15% of sale (5% listing, 10% tax)",
     "capture": f"{flip.CAPTURE:.0%} of each side's 7-day average filled flow "
     "once our order reaches the front",
@@ -455,7 +460,10 @@ Generated __GENERATED__ &middot; prices as of __PRICES__ &middot; __SCANNED__ it
 </table>
 <div class="notes">
 <p>Ranked by EV/day: after-fee margin over the estimated per-unit round-trip
-time at our assumed share of traded flow. Model assumptions:</p>
+time at our assumed share of traded flow. Buy order and sell listing are the
+orders you place; best bid and best ask are where the book sits right now, so
+the gap between the two pairs is how far your orders are from the market.
+Model assumptions:</p>
 <ul>__ASSUMPTIONS__</ul>
 <p>Estimates from public data; spreads can close before you act. Check the
 live order book in game before committing gold. Item links go to gw2bltc
@@ -488,8 +496,10 @@ rows as anecdotes, not patterns.</p>
 <script>
 var cols = [
   {key: "name", label: "Item", str: true},
-  {key: "buy_at", label: "Buy at", money: true},
-  {key: "sell_at", label: "Sell at", money: true},
+  {key: "buy_at", label: "Buy order", money: true},
+  {key: "sell_at", label: "Sell listing", money: true},
+  {key: "best_bid", label: "Best bid", money: true},
+  {key: "best_ask", label: "Best ask", money: true},
   {key: "margin", label: "Margin", money: true},
   {key: "margin_pct", label: "Margin %", pct: true},
   {key: "qty", label: "Qty"},

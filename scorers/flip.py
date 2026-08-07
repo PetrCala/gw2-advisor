@@ -32,6 +32,11 @@ TOP_N = 50
 # M3 depth pass over the v1 shortlist.
 SHORTLIST_N = 200
 WAIT_TOLERANCE_DAYS = 0.25  # queue we accept ahead of us when pricing into a gap
+# How far off the touch a placement may sit. The wait budget above assumes the
+# queue ahead of us drains and never refills, which is false: new orders arrive
+# between us and the touch faster than the book fills. Past a couple of percent
+# the order is waiting for a price move, not for a queue, so the walk stops.
+MAX_WALK_PCT = 0.02
 PENNY_WAR_PER_DAY = 150.0  # combined outbid+undercut rate that kills an item
 
 
@@ -111,10 +116,10 @@ def rescore(pick, item_book, rates):
     """Depth-aware second pass over a v1 pick; None when the book kills it.
 
     Replaces best+-1c with prices walked into book gaps under the wait
-    budget, adds the queue wait to the round trip, drops penny-war items
-    (rates = (outbids/day, undercuts/day) or None when we lack delta
-    history), and marks the instant-exit floor from dumping the lot into
-    the buy book.
+    budget and within MAX_WALK_PCT of the touch, adds the queue wait to the
+    round trip, drops penny-war items (rates = (outbids/day, undercuts/day)
+    or None when we lack delta history), and marks the instant-exit floor
+    from dumping the lot into the buy book.
     """
     buys, sells = item_book.get("buys"), item_book.get("sells")
     if not buys or not sells:
@@ -128,8 +133,13 @@ def rescore(pick, item_book, rates):
         outbid = undercut = None
 
     buy_flow, sell_flow = pick["buy_flow"], pick["sell_flow"]
-    buy_at = book.choose_buy_price(buys, buy_flow, WAIT_TOLERANCE_DAYS)
-    sell_at = book.choose_sell_price(sells, sell_flow, WAIT_TOLERANCE_DAYS)
+    best_bid, best_ask = buys[0][0], sells[0][0]
+    buy_at = book.choose_buy_price(
+        buys, buy_flow, WAIT_TOLERANCE_DAYS, best_bid * (1 - MAX_WALK_PCT)
+    )
+    sell_at = book.choose_sell_price(
+        sells, sell_flow, WAIT_TOLERANCE_DAYS, best_ask * (1 + MAX_WALK_PCT)
+    )
     if not buy_at or not sell_at:
         return None
 
@@ -156,6 +166,8 @@ def rescore(pick, item_book, rates):
     out.update(
         buy_at=buy_at,
         sell_at=sell_at,
+        best_bid=best_bid,
+        best_ask=best_ask,
         margin=margin,
         margin_pct=margin / buy_at,
         qty=qty,

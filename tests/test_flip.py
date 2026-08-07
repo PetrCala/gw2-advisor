@@ -90,6 +90,31 @@ def test_rescore_prices_into_gaps():
     assert r["exit_pct"] < 0  # dumping into the buy book always loses
 
 
+def test_rescore_reports_the_touch_alongside_our_prices():
+    pick = flip.score_item(dict(BASE))
+    r = flip.rescore(pick, BOOK, None)
+    assert (r["best_bid"], r["best_ask"]) == (1000, 1400)
+    assert r["buy_at"] <= r["best_bid"] + 1 and r["sell_at"] >= r["best_ask"] - 1
+
+
+# Thin crowd at the touch under a wide gap, as Guild Flame Ram Blueprint
+# looked on 2026-08-07: the wait budget alone walks the listing 70% above a
+# market that trades at 1400, and the margin is then pure fiction.
+GAPPED_BOOK = {
+    "buys": [[1000, 100], [990, 50], [980, 5000]],
+    "sells": [[1400, 30], [1402, 5], [1560, 80], [1700, 300], [2400, 50_000]],
+}
+
+
+def test_rescore_keeps_the_listing_beside_the_touch():
+    pick = flip.score_item(dict(BASE))
+    r = flip.rescore(pick, GAPPED_BOOK, None)
+    assert r["sell_at"] <= 1400 * (1 + flip.MAX_WALK_PCT)
+    assert r["sell_at"] == 1401  # 1c under the 1402 level, not up in the gap
+    # Unbounded, the walk lands at 2399 and claims a margin over 1000c.
+    assert r["margin"] < 250
+
+
 def test_rescore_drops_penny_wars():
     pick = flip.score_item(dict(BASE))
     assert flip.rescore(pick, BOOK, (100.0, 100.0)) is None

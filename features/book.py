@@ -9,15 +9,24 @@ price and take the deepest level whose queue ahead of us still clears
 within a wait budget at the item's observed flow. Existing orders ahead of
 ours absorb the side's full flow before we fill at all, so the wait is
 queue_ahead / flow, not capture-scaled.
+
+The wait budget alone is not enough of a bound, because the queue ahead of
+us is not a fixed pile: new orders keep arriving between us and the touch.
+On the shortlist, listings arrive several times faster than they fill, and
+book depth stays flat for weeks while the whole book turns over daily. A
+placement far off the touch is therefore waiting for the market to move to
+it, not for a queue to drain, so callers pass a price bound as well and the
+walk stops at whichever limit binds first.
 """
 
 
-def choose_buy_price(buys, flow_per_day, wait_tolerance_days):
+def choose_buy_price(buys, flow_per_day, wait_tolerance_days, min_price=None):
     """Our buy-order price, or None if the book side is empty.
 
     Candidates are 1c above each level. Walking down the book raises margin
     but queues us behind everything priced higher; accept the deepest level
-    whose queue fills within the wait budget.
+    whose queue fills within the wait budget and stays at or above
+    `min_price`. The best buy plus 1c is always allowed, bound or not.
     """
     if not buys or flow_per_day <= 0:
         return None
@@ -27,11 +36,13 @@ def choose_buy_price(buys, flow_per_day, wait_tolerance_days):
         ahead += prev[1]
         if ahead > max_queue:
             break
+        if min_price is not None and nxt[0] + 1 < min_price:
+            break
         price = nxt[0] + 1
     return price
 
 
-def choose_sell_price(sells, flow_per_day, wait_tolerance_days):
+def choose_sell_price(sells, flow_per_day, wait_tolerance_days, max_price=None):
     """Our sell-listing price, or None if the book side is empty. Mirrored."""
     if not sells or flow_per_day <= 0:
         return None
@@ -40,6 +51,8 @@ def choose_sell_price(sells, flow_per_day, wait_tolerance_days):
     for prev, nxt in zip(sells, sells[1:]):
         ahead += prev[1]
         if ahead > max_queue:
+            break
+        if max_price is not None and nxt[0] - 1 > max_price:
             break
         price = nxt[0] - 1
     return price
