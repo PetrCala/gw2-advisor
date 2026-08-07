@@ -13,7 +13,7 @@ CONTRACT_KEYS = {
     "id", "name", "event", "bucket", "verdict",
     "buy_opens", "buy_closes", "sell_opens", "sell_closes",
     "limit_price", "cur_price", "entry_premium", "suggested_qty",
-    "flow_used", "flow_estimated",
+    "flow_used", "flow_estimated", "exit_pct",
     "days_to_buy", "days_left", "confidence", "score",
     "med_ret", "hit_rate", "hold_days",
 }
