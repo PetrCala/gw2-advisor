@@ -289,6 +289,14 @@ def _mmdd(iso, today):
     return s if d.year == today.year else f"{s}, {d.year}"
 
 
+def _mmdd_span(iso0, iso1, today):
+    """'Mon DD - Mon DD', a shared non-current year written once at the end."""
+    d0, d1 = date.fromisoformat(iso0), date.fromisoformat(iso1)
+    if d0.year == d1.year and d0.year != today.year:
+        return f"{d0.strftime('%b')} {d0.day:02d} - {_mmdd(iso1, today)}"
+    return f"{_mmdd(iso0, today)} - {_mmdd(iso1, today)}"
+
+
 def _item_link(p):
     return (
         f'<a class="r-{escape(p["rarity"])}" '
@@ -366,8 +374,8 @@ def festivals_html(festivals, today):
         est = ", est." if f["estimated"] else ""
         picks = f", {f['picks']} picks" if f["picks"] else ""
         bits.append(
-            f"<b>{escape(f['name'])}</b> {_mmdd(f['start'], today)} - "
-            f"{_mmdd(f['end'], today)} ({when}{est}{picks})"
+            f"<b>{escape(f['name'])}</b> {_mmdd_span(f['start'], f['end'], today)} "
+            f"({when}{est}{picks})"
         )
     return " &middot; ".join(bits)
 
@@ -445,14 +453,14 @@ TEMPLATE = """<!doctype html>
 <title>gw2-advisor: daily flips</title>
 <style>
 :root { color-scheme: dark; }
-body { background: #16181d; color: #d6d8de; font: 14px/1.5 system-ui, sans-serif;
-       margin: 0 auto; max-width: 1080px; padding: 24px 16px 48px; }
-h1 { font-size: 20px; margin: 0 0 4px; }
-h2 { font-size: 17px; margin: 36px 0 4px; }
-.meta { color: #8a8f9c; font-size: 13px; margin-bottom: 16px; }
+body { background: #16181d; color: #d6d8de; font: 13px/1.4 system-ui, sans-serif;
+       margin: 0; padding: 8px 10px 24px; }
+h1 { font-size: 17px; margin: 0 0 2px; }
+h2 { font-size: 15px; margin: 16px 0 2px; }
+.meta { color: #8a8f9c; font-size: 12px; margin-bottom: 6px; }
 .meta a { color: #8ab4f8; }
 table { border-collapse: collapse; width: 100%; }
-th, td { padding: 5px 8px; text-align: right; white-space: nowrap; }
+th, td { padding: 2px 5px; text-align: right; white-space: nowrap; line-height: 1.3; }
 th { cursor: pointer; user-select: none; color: #aab0bd; border-bottom: 1px solid #3a3f4b;
      position: sticky; top: 0; background: #16181d; }
 th.active { color: #fff; }
@@ -472,14 +480,16 @@ td a:hover { text-decoration: underline; }
 .exit-risk { color: #e06c75; font-weight: 600; }
 .v-act_now { color: #7ec97f; } .v-caution { color: #e0c068; } .v-skip_today { color: #8a8f9c; }
 .queue { background: #1b1e25; border: 1px solid #3a3f4b; border-radius: 6px;
-         padding: 4px 16px 10px; margin: 12px 0 20px; }
-.queue h3 { font-size: 14px; margin: 10px 0 2px; color: #aab0bd; }
-.queue ul { margin: 4px 0; padding-left: 20px; }
-.queue p { margin: 6px 0; color: #8a8f9c; }
+         padding: 2px 12px 6px; margin: 6px 0 10px; }
+.queue h3 { font-size: 13px; margin: 6px 0 1px; color: #aab0bd; }
+.queue ul { margin: 2px 0; padding-left: 18px; }
+.queue p { margin: 4px 0; color: #8a8f9c; }
 .r-Fine { color: #62a4da; } .r-Masterwork { color: #59b135; } .r-Rare { color: #fcd00b; }
 .r-Exotic { color: #ffa405; } .r-Ascended { color: #fb3e8d; } .r-Legendary { color: #a675f0; }
-.notes { color: #8a8f9c; font-size: 13px; margin-top: 24px; }
-.notes ul { margin: 6px 0; padding-left: 20px; }
+.notes { color: #8a8f9c; font-size: 12px; margin-top: 8px; }
+.notes p { margin: 6px 0; }
+.notes ul { margin: 4px 0; padding-left: 18px; }
+.notes summary { cursor: pointer; color: #aab0bd; }
 </style>
 </head>
 <body>
@@ -495,16 +505,19 @@ Generated __GENERATED__ &middot; prices as of __PRICES__ &middot; __SCANNED__ it
 <tbody></tbody>
 </table>
 <div class="notes">
+<details>
+<summary>How to read this table, and the model assumptions</summary>
 <p>Sorted by verdict: act now first, then caution, then skip today (click
-EV/day to rank by expected profit instead). Buy order and sell listing are
-the orders you place; best bid and best ask are where the book sits right
-now, so the gap between the two pairs is how far your orders are from the
-market. Break-even and bail are exit prices: list at sell_at, relist down
-to break-even, dump below bail. Model assumptions:</p>
+EV/day to rank by expected profit instead); hover a verdict for its
+reasons. Buy and sell are the orders you place; bid and ask are where the
+book sits right now, so the gap between the pairs is how far your orders
+are from the market. B/even and bail are exit prices: list at the sell
+price, relist down to break-even, dump below bail. Model assumptions:</p>
 <ul>__ASSUMPTIONS__</ul>
 <p>Estimates from public data; spreads can close before you act. Check the
 live order book in game before committing gold. Item links go to gw2bltc
 for a second opinion.</p>
+</details>
 </div>
 <h2>Speculative seasonal picks</h2>
 <div class="meta">
@@ -518,6 +531,8 @@ __QUEUE__
 <tbody></tbody>
 </table>
 <div class="notes">
+<details>
+<summary>How to read this table, and the model assumptions</summary>
 <p>Buy-and-hold candidates from multi-year seasonality, sorted by what is
 actionable today (click Score to rank by pattern quality instead). The
 timing column is the verdict: buy now means the current price sits under
@@ -529,27 +544,28 @@ assumptions:</p>
 launches reprice whole material classes (cycles overlapping one are
 labeled in the hover). Few cycles mean wide error bars; treat low-cycle
 rows as anecdotes, not patterns.</p>
+</details>
 </div>
 <script>
 var cols = [
   {key: "name", label: "Item", str: true},
   {key: "verdict", label: "Verdict", str: true},
-  {key: "buy_at", label: "Buy order", money: true},
-  {key: "sell_at", label: "Sell listing", money: true},
-  {key: "break_even_sell", label: "Break-even", money: true},
+  {key: "buy_at", label: "Buy", money: true},
+  {key: "sell_at", label: "Sell", money: true},
+  {key: "break_even_sell", label: "B/even", money: true},
   {key: "bail_price", label: "Bail", money: true},
-  {key: "best_bid", label: "Best bid", money: true},
-  {key: "best_ask", label: "Best ask", money: true},
+  {key: "best_bid", label: "Bid", money: true},
+  {key: "best_ask", label: "Ask", money: true},
   {key: "margin", label: "Margin", money: true},
-  {key: "margin_pct", label: "Margin %", pct: true},
+  {key: "margin_pct", label: "M%", pct: true},
   {key: "qty", label: "Qty"},
   {key: "capital", label: "Capital", money: true},
   {key: "buy_flow", label: "Buys/d"},
   {key: "sell_flow", label: "Sells/d"},
-  {key: "outbid_day", label: "Outbid/d"},
-  {key: "undercut_day", label: "Under/d"},
+  {key: "outbid_day", label: "Outbid"},
+  {key: "undercut_day", label: "Under"},
   {key: "exit_pct", label: "Exit", pct: true},
-  {key: "round_trip_days", label: "Round trip", days: true},
+  {key: "round_trip_days", label: "Trip", days: true},
   {key: "ev_day", label: "EV/day", money: true},
   {key: "confidence", label: "Conf", str: true}
 ];
@@ -566,7 +582,7 @@ var scols = [
   {key: "last_ret", label: "Last", pct: true},
   {key: "hit_rate", label: "Hit", pct: true},
   {key: "hold_days", label: "Hold d"},
-  {key: "limit_price", label: "Pay up to", money: true},
+  {key: "limit_price", label: "Limit", money: true},
   {key: "cur_price", label: "Price", money: true},
   {key: "suggested_qty", label: "Qty"},
   {key: "flow_used", label: "Flow/d"},
@@ -594,8 +610,12 @@ function cell(r, c) {
       r.id + '" title="' + esc(r.rarity) + '">' + esc(v) + "</a>";
   if (c.key === "confidence")
     return '<span class="conf-' + esc(v) + '">' + esc(v) + "</span>";
-  if (c.key === "verdict")
-    return '<span class="v-' + esc(r.bucket) + '">' + esc(v) + "</span>";
+  if (c.key === "verdict") {
+    var cut = v.indexOf(": ");
+    var label = cut < 0 ? v : v.slice(0, cut);
+    return '<span class="v-' + esc(r.bucket) + '" title="' + esc(v) + '">' +
+      esc(label) + "</span>";
+  }
   if (c.key === "exit_pct" && r.exit_risk)
     return '<span class="exit-risk" title="no bail-out size in the live book">' +
       (100 * v).toFixed(1) + "%!</span>";
