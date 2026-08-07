@@ -62,6 +62,10 @@ pip install -r collector/requirements.txt
 python -m report.build --local
 ```
 
+## Paper track record
+
+Every build's picks are also opened as paper positions (`report/track.py`) and replayed against the following days' market data, so the model's promises get marked against what the market did instead of being taken on faith. The scoreboard publishes to [track.html](https://petrcala.github.io/gw2-advisor/track.html) with `track.json` alongside it: how often a pick's order ever reached the front of the book, how much of the predicted net came back, and the capture share the fills would actually have demanded against the assumed 25%. No gold is at risk and no order is ever placed; fills are simulated, so this measures whether the placement was reachable and the flow was there, not our own share against real competitors.
+
 Seasonal queue transitions (a pick becomes a buy, opens soon, hits its sell window, or stops being a buy) are posted as comments on [issue #20](https://github.com/PetrCala/gw2-advisor/issues/20); subscribe to that issue for free email/push notifications. The same events publish as an RSS feed at [feed.xml](https://petrcala.github.io/gw2-advisor/feed.xml).
 
 ## Status
