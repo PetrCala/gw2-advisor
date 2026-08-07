@@ -39,6 +39,20 @@ value as it stood in the past, not the official one and not gw2efficiency, so
 account value deltas are only available between snapshots you have taken.
 Snapshots are local and git-ignored.
 
+Once the daily report publishes its seasonal action queue
+([actions.json](https://petrcala.github.io/gw2-advisor/actions.json)), you can
+merge it with your own holdings and open orders:
+
+```
+python -m report.actions                        # personal action queue
+python -m report.actions --file queue.json      # offline, from a local copy
+```
+
+For each pick it says what you hold, what you have listed or bid, and how your
+bids compare to the pay-up-to limit; dormant picks are dropped. The command is
+read-only, the API key stays on this machine, and it is deliberately not part
+of any workflow.
+
 ## Daily report
 
 The flip shortlist publishes to [petrcala.github.io/gw2-advisor](https://petrcala.github.io/gw2-advisor/) daily (04:10 UTC, plus GitHub cron jitter). The seasonal section leads with an action queue (buy now, opens soon, sell window) and a festival countdown; the same queue is published as machine-readable `actions.json`. A second table lists speculative seasonal picks (buy window, sell window, and the return of every past cycle), recomputed weekly by season.yml from the multi-year history. Trigger an off-schedule rebuild anytime with `gh workflow run report.yml`. Build it locally without AWS access:
