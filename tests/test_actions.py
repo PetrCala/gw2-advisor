@@ -92,6 +92,89 @@ def test_capture_matches_the_flip_scorer():
     assert actions.CAPTURE == flip.CAPTURE
 
 
+# --- exit floor sizing and gating --------------------------------------------
+
+
+def _live_pick(bucket="buy_now", qty=100, price=90, score=0.5):
+    return {
+        "bucket": bucket, "cur_price": price, "suggested_qty": qty,
+        "score": score, "verdict": "buy now, closes Sep 27",
+    }
+
+
+def test_bounded_qty_leaves_a_deep_book_alone():
+    buys = [[100, 1000]]
+    assert actions.bounded_qty(buys, 50, 90) == 50
+
+
+def test_bounded_qty_shrinks_to_what_the_book_absorbs():
+    buys = [[100, 10], [50, 10], [10, 1000]]
+    assert actions.bounded_qty(buys, 100, 90) == 24
+    assert actions.exit_pct(buys, 24, 90) >= actions.EXIT_FLOOR_MIN
+    assert actions.exit_pct(buys, 25, 90) < actions.EXIT_FLOOR_MIN
+
+
+def test_bounded_qty_zero_when_even_one_unit_breaches_the_floor():
+    buys = [[10, 1000]]  # a huge gap right under any realistic touch price
+    assert actions.bounded_qty(buys, 50, 90) == 0
+
+
+def test_bounded_qty_needs_a_book_a_lot_and_a_price():
+    assert actions.bounded_qty(None, 50, 90) == 50
+    assert actions.bounded_qty([[100, 1000]], None, 90) is None
+    assert actions.bounded_qty([[100, 1000]], 50, None) == 50
+
+
+def test_apply_exit_floor_leaves_a_deep_book_untouched():
+    p = _live_pick(qty=50, price=90)
+    actions.apply_exit_floor(p, [[100, 1000]])
+    assert p["suggested_qty"] == 50
+    assert not p["exit_risk"]
+    assert p["bucket"] == "buy_now"
+    assert p["exit_pct"] == actions.exit_pct([[100, 1000]], 50, 90)
+
+
+def test_apply_exit_floor_shrinks_the_lot_and_the_exit_pct_with_it():
+    buys = [[100, 10], [50, 10], [10, 1000]]
+    p = _live_pick(qty=100, price=90)
+    actions.apply_exit_floor(p, buys)
+    assert p["suggested_qty"] == 24
+    assert p["exit_pct"] == actions.exit_pct(buys, 24, 90)
+    assert not p["exit_risk"]
+    assert p["bucket"] == "buy_now"
+
+
+def test_apply_exit_floor_demotes_a_catastrophic_buy_now():
+    buys = [[10, 1000]]
+    p = _live_pick(bucket="buy_now", qty=50, price=90, score=0.5)
+    actions.apply_exit_floor(p, buys)
+    assert p["exit_risk"]
+    assert p["suggested_qty"] is None
+    assert p["bucket"] == "dormant"
+    assert p["verdict"].startswith("skip: exit floor")
+    assert p["exit_pct"] == actions.exit_pct(buys, 50, 90)
+    rank = actions.BUCKETS.index("dormant")
+    assert p["act"] == round((len(actions.BUCKETS) - 1 - rank) * 10 + 0.5, 3)
+
+
+def test_apply_exit_floor_flags_but_does_not_demote_a_sell_active_pick():
+    buys = [[10, 1000]]
+    p = _live_pick(bucket="sell_active", qty=50, price=90)
+    actions.apply_exit_floor(p, buys)
+    assert p["exit_risk"]
+    assert p["bucket"] == "sell_active"  # already owned; nothing left to gate
+    assert p["verdict"] == "buy now, closes Sep 27"  # untouched
+
+
+def test_apply_exit_floor_without_a_book_only_clears_exit_pct():
+    p = _live_pick(qty=50, price=90)
+    actions.apply_exit_floor(p, None)
+    assert p["exit_pct"] is None
+    assert not p["exit_risk"]
+    assert p["suggested_qty"] == 50
+    assert p["bucket"] == "buy_now"
+
+
 # --- span dates -------------------------------------------------------------
 
 
@@ -140,6 +223,16 @@ def test_anchored_span_without_an_event():
     assert actions.anchored_span(today, (250, 270)) == (
         date(2026, 9, 7), date(2026, 9, 27), False
     )
+
+
+# --- date formatting ---------------------------------------------------------
+
+
+def test_fmt_appends_year_only_when_it_differs_from_today():
+    today = date(2026, 8, 7)
+    assert actions._fmt(date(2026, 9, 27), today) == "Sep 27"
+    assert actions._fmt(date(2027, 1, 20), today) == "Jan 20, 2027"
+    assert actions._fmt(date(2025, 12, 16), today) == "Dec 16, 2025"
 
 
 # --- verdicts ---------------------------------------------------------------
@@ -245,6 +338,15 @@ def test_enrich_keeps_typical_dates_while_unannounced():
     p = actions.enrich(_pick(event="Halloween", buy_doy=[211, 238]), date(2026, 8, 7))
     assert p["buy_opens"] == "2026-07-30"
     assert p["bucket"] == "buy_now"
+
+
+def test_enrich_appends_year_when_the_window_crosses_into_next_year():
+    p = actions.enrich(_pick(buy_doy=[350, 20]), date(2026, 12, 25))
+    assert p["bucket"] == "buy_now"
+    assert p["buy_opens"] == "2026-12-16"
+    assert p["buy_closes"] == "2027-01-20"
+    assert p["buy_window"] == "Dec 16 - Jan 20, 2027"  # only the 2027 end needs it
+    assert p["verdict"] == "buy now, closes Jan 20, 2027"
 
 
 def test_act_orders_buckets_before_score():
