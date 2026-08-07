@@ -21,6 +21,7 @@ entry-premium basis in season/compute.py.
 from datetime import date, timedelta
 from statistics import median
 
+from features import book
 from season import cycles, events
 from season.cycles import TAX
 
@@ -138,6 +139,19 @@ def suggested_qty(flow, days_remaining, limit, sell_flow=None, sell_days=None):
     if sell_flow and sell_days:
         caps.append(CAPTURE * sell_flow * sell_days)
     return int(min(caps))
+
+
+def exit_pct(buys, qty, price):
+    """Per-unit loss from dumping qty into today's buy book, or None.
+
+    worst_ret says how bad past cycles got; this says how bad today is if
+    the peak never comes and the position has to leave at market. Same
+    definition as the flip table's exit %, over the suggested lot.
+    """
+    if not buys or not qty or not price:
+        return None
+    net = book.dump_value(buys, qty) * (1 - TAX)
+    return round((net / qty - price) / price, 3)
 
 
 def enrich(pick, today, fresh_price=None, fresh_flow=None):

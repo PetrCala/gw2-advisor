@@ -72,6 +72,22 @@ def test_sizing_flow_prefers_the_window_then_falls_back():
     assert actions.sizing_flow(blank, "buy", None) == (None, False)
 
 
+def test_exit_pct_on_a_deep_book():
+    # 100 units all fill at 100c, netting 85c against a 90c price.
+    assert actions.exit_pct([[100, 500]], 100, 90) == round(85 / 90 - 1, 3)
+
+
+def test_exit_pct_walks_a_thin_book_down():
+    buys = [[100, 10], [50, 10], [10, 1000]]
+    assert actions.exit_pct(buys, 100, 90) < actions.exit_pct(buys, 10, 90)
+
+
+def test_exit_pct_needs_a_book_a_lot_and_a_price():
+    assert actions.exit_pct([], 100, 90) is None
+    assert actions.exit_pct([[100, 500]], None, 90) is None
+    assert actions.exit_pct([[100, 500]], 100, None) is None
+
+
 def test_capture_matches_the_flip_scorer():
     assert actions.CAPTURE == flip.CAPTURE
 

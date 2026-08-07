@@ -62,6 +62,7 @@ SEASONAL_CSV_COLS = [
     "hit_rate",
     "worst_ret",
     "last_ret",
+    "exit_pct",
     "strength",
     "cur_price",
     "limit_price",
@@ -93,6 +94,7 @@ ACTIONS_COLS = [
     "suggested_qty",
     "flow_used",
     "flow_estimated",
+    "exit_pct",
     "days_to_buy",
     "days_left",
     "confidence",
@@ -124,6 +126,9 @@ SEASONAL_ASSUMPTIONS = {
     f"days, capped by the same share of the sell window (exit liquidity) and "
     f"by {season_actions.SEASON_CAPITAL // 10000}g of capital per pick; windows "
     "with no observed flow fall back to recent overall daily flow, marked est",
+    "exit": "exit % is the loss per unit if the suggested lot were dumped into "
+    "today's buy book instead of waiting for the peak, fetched live for the picks "
+    "inside a buy or sell window; worst is the worst past cycle for comparison",
 }
 
 ASSUMPTIONS = {
@@ -202,6 +207,7 @@ def main():
             price, flow = fresh.get(p["id"], (None, None))
             season_actions.enrich(p, today, price, flow)
         festivals = season_actions.next_festivals(today, seasonal["picks"])
+        add_exit_floor(seasonal["picks"])
 
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     write_site(
@@ -214,6 +220,28 @@ def main():
         f"(reprice rates: {'yes' if rates else 'no'}, "
         f"seasonal picks: {n_seasonal}) -> {SITE / 'index.html'}"
     )
+
+
+def add_exit_floor(spicks):
+    """Attach exit_pct to the picks in a buy or sell window.
+
+    Only those few need an order book: they are the ones a position could
+    be opened or closed on today, so the extra listings call stays small.
+    A failure leaves the column blank rather than gating the page.
+    """
+    live = [p for p in spicks if p["bucket"] in ("buy_now", "sell_active")]
+    if not live:
+        return
+    try:
+        books = gw2api.fetch_listings([p["id"] for p in live])
+    except Exception as e:  # the exit floor refines the picks, it doesn't gate them
+        print(f"seasonal order books unavailable: {e}")
+        return
+    for p in live:
+        b = books.get(p["id"])
+        p["exit_pct"] = season_actions.exit_pct(
+            b["buys"] if b else None, p["suggested_qty"], p["cur_price"]
+        )
 
 
 def money_html(c):
@@ -484,6 +512,7 @@ var scols = [
   {key: "n_cycles", label: "Cycles"},
   {key: "med_ret", label: "Med ret", pct: true},
   {key: "worst_ret", label: "Worst", pct: true},
+  {key: "exit_pct", label: "Exit", pct: true},
   {key: "last_ret", label: "Last", pct: true},
   {key: "hit_rate", label: "Hit", pct: true},
   {key: "hold_days", label: "Hold d"},
