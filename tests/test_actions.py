@@ -377,6 +377,51 @@ def test_act_orders_buckets_before_score():
     assert buy["act"] > soon["act"] > sell["act"] > dormant["act"]
 
 
+# --- bankroll-driven sizing ---------------------------------------------------
+
+
+def test_festival_capital_falls_back_to_the_flat_constant_when_unset():
+    assert actions.festival_capital(3, None) == actions.SEASON_CAPITAL
+    assert actions.festival_capital(0, 1_000_000) == actions.SEASON_CAPITAL
+
+
+def test_festival_capital_splits_the_cap_across_active_picks():
+    assert actions.festival_capital(4, 1_000_000) == 62_500  # 25% of 1m / 4
+
+
+def test_enrich_all_uses_the_flat_constant_without_a_bankroll():
+    picks = [_pick(id=1), _pick(id=2)]
+    actions.enrich_all(picks, date(2026, 9, 10))
+    assert all(p["suggested_qty"] == 425 for p in picks)
+
+
+def test_enrich_all_splits_the_festival_cap_across_active_picks():
+    picks = [_pick(id=1), _pick(id=2)]
+    actions.enrich_all(picks, date(2026, 9, 10), bankroll_copper=96_000)
+    # both buy_now; capital binds at (96,000 x 25% / 2) // limit 120 = 100
+    assert all(p["bucket"] == "buy_now" for p in picks)
+    assert all(p["suggested_qty"] == 100 for p in picks)
+
+
+def test_enrich_all_only_splits_across_active_buckets():
+    active = _pick(id=1)
+    dormant = _pick(id=2, buy_doy=[1, 5], sell_doy=[10, 15])
+    picks = [active, dormant]
+    actions.enrich_all(picks, date(2026, 9, 10), bankroll_copper=96_000)
+    assert active["bucket"] == "buy_now"
+    assert dormant["bucket"] == "dormant"
+    # sole active pick claims the whole cap: (96,000 x 25%) // 120 = 200
+    assert active["suggested_qty"] == 200
+
+
+def test_enrich_all_passes_through_fresh_prices_and_flow():
+    picks = [_pick(id=1, window_flow=None)]
+    actions.enrich_all(picks, date(2026, 9, 10), fresh={1: (100, 50)})
+    assert picks[0]["cur_price"] == 100
+    assert picks[0]["flow_used"] == 50
+    assert picks[0]["flow_estimated"]
+
+
 # --- festivals --------------------------------------------------------------
 
 

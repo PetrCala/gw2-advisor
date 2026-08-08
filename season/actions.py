@@ -22,21 +22,30 @@ how much dumping the suggested lot into today's buy book could lose, and
 sizing shrinks the lot to whatever the book actually absorbs within it. A
 book too thin for any size to clear the floor has no real bail-out, so
 apply_exit_floor flags it and demotes a buy_now pick out of the queue.
+
+Capital per pick used to be the flat SEASON_CAPITAL constant, right for
+proving the pattern and wrong for using it at size (docs/INVESTING.md, S3).
+enrich_all splits the festival bankroll cap (invest.bankroll) evenly across
+whatever picks are actively claiming capital today (buy_now, opens_soon),
+still bounded by the same capture and exit-book caps below; without a
+configured bankroll it falls back to SEASON_CAPITAL, unchanged from before.
 """
 
 from datetime import date, timedelta
 from statistics import median
 
 from features import book
+from invest import bankroll
 from season import cycles, events
 from season.cycles import TAX
 
 RETURN_HURDLE = 0.20  # net return demanded at the recent median sell price
 RECENT_CYCLES = 3  # price basis; old cycles carry pre-inflation prices
 CAPTURE = 0.25  # share of window flow we absorb, as in scorers.flip
-SEASON_CAPITAL = 500_000  # copper per pick; capital sits locked for months
+SEASON_CAPITAL = 500_000  # copper per pick without a configured bankroll
 OPENS_SOON_DAYS = 30
 UNCONFIRMED_WARN_DAYS = 60
+ACTIVE_BUCKETS = ("buy_now", "opens_soon")  # buckets currently claiming capital
 
 # A dumped lot losing more than this is still tolerable: sizing caps the
 # suggested qty to whatever the live buy book can absorb within it. A pick
@@ -152,15 +161,18 @@ def sizing_flow(pick, side, fresh_flow=None):
     return (round(fresh_flow), True) if fresh_flow else (None, False)
 
 
-def suggested_qty(flow, days_remaining, limit, sell_flow=None, sell_days=None):
+def suggested_qty(flow, days_remaining, limit, sell_flow=None, sell_days=None,
+                  capital=SEASON_CAPITAL):
     """Units to buy: our flow share over the window, capped by capital.
 
     Exit liquidity bounds a hold as hard as entry liquidity does, so the
-    sell window gets the same capture cap when its flow is known.
+    sell window gets the same capture cap when its flow is known. capital
+    defaults to the flat SEASON_CAPITAL; enrich_all passes a bankroll-sized
+    share instead once BANKROLL_G is configured.
     """
     if not flow or not limit or not days_remaining:
         return None
-    caps = [CAPTURE * flow * days_remaining, SEASON_CAPITAL // limit]
+    caps = [CAPTURE * flow * days_remaining, capital // limit]
     if sell_flow and sell_days:
         caps.append(CAPTURE * sell_flow * sell_days)
     return int(min(caps))
@@ -237,7 +249,7 @@ def apply_exit_floor(pick, buys, floor=EXIT_FLOOR_MIN):
     return pick
 
 
-def enrich(pick, today, fresh_price=None, fresh_flow=None):
+def enrich(pick, today, fresh_price=None, fresh_flow=None, capital=SEASON_CAPITAL):
     """Recompute calendar and price fields, attach bucket and verdict.
 
     Mutates and returns the pick. The artifact's stored days_to_buy,
@@ -246,7 +258,9 @@ def enrich(pick, today, fresh_price=None, fresh_flow=None):
     festival calendar, the cycles evidence and the fresh snapshot price
     (falling back to the artifact price when the snapshot lacks the item).
     fresh_flow is the item's recent overall daily flow, used for sizing
-    only when a window has no observed flow of its own.
+    only when a window has no observed flow of its own. capital is the
+    per-pick capital cap passed to suggested_qty; see enrich_all for how a
+    configured bankroll turns this into a share of the festival cap.
     """
     buy_doy = tuple(pick["buy_doy"])
     sell_doy = tuple(pick["sell_doy"])
@@ -265,7 +279,7 @@ def enrich(pick, today, fresh_price=None, fresh_flow=None):
     sell_flow, _ = sizing_flow(pick, "sell", fresh_flow)
     qty = suggested_qty(
         flow, left if in_buy else window_len, limit,
-        sell_flow, (s1 - s0).days + 1,
+        sell_flow, (s1 - s0).days + 1, capital=capital,
     )
 
     if in_buy and limit is not None and price is not None and price <= limit:
@@ -301,6 +315,48 @@ def enrich(pick, today, fresh_price=None, fresh_flow=None):
         act=round((len(BUCKETS) - 1 - rank) * 10 + pick["score"], 3),
     )
     return pick
+
+
+def festival_capital(n_active, bankroll_copper=None):
+    """Per-pick capital cap in copper for enrich_all.
+
+    The festival bankroll cap (invest.bankroll.CAPS) split evenly across
+    n_active concurrently active picks; falls back to the flat
+    SEASON_CAPITAL when the bankroll is not configured or nothing is
+    active, so picks size exactly as they did before bankroll config
+    existed.
+    """
+    if not bankroll_copper or n_active <= 0:
+        return SEASON_CAPITAL
+    cap = int(bankroll_copper * bankroll.CAPS["festival carry"])
+    return max(1, cap // n_active)
+
+
+def enrich_all(picks, today, fresh=None, bankroll_copper=None):
+    """enrich() every pick, then resize the active ones to their share of
+    the festival bankroll cap.
+
+    Bucket, verdict and every calendar field are stable regardless of
+    capital, so the first pass (the flat default) already gets them right;
+    only the picks currently claiming capital (ACTIVE_BUCKETS) need a
+    second suggested_qty pass once the per-pick share is known. Without a
+    configured bankroll, festival_capital returns SEASON_CAPITAL and the
+    second pass is skipped, leaving every pick exactly as before this
+    milestone. `fresh` is {id: (price, flow)}, the same mapping
+    report.build already assembles from the snapshot; mutates and returns
+    picks.
+    """
+    fresh = fresh or {}
+    for p in picks:
+        price, flow = fresh.get(p["id"], (None, None))
+        enrich(p, today, price, flow)
+    active = [p for p in picks if p["bucket"] in ACTIVE_BUCKETS]
+    capital = festival_capital(len(active), bankroll_copper)
+    if capital != SEASON_CAPITAL:
+        for p in active:
+            price, flow = fresh.get(p["id"], (None, None))
+            enrich(p, today, price, flow, capital=capital)
+    return picks
 
 
 def _next_run(name, today):

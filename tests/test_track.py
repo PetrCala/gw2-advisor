@@ -34,6 +34,16 @@ def _queue_row(**over):
     return r
 
 
+def _chain(**over):
+    c = {
+        "key": "mithrillium", "name": "Lump of Mithrillium -> Deldrimor Steel Ingot",
+        "output_id": 46738, "cost": 1000, "revenue": 1300, "spread": 0.3,
+        "dead": False,
+    }
+    c.update(over)
+    return c
+
+
 class FakeStore:
     """collector.s3store.Store's read/write surface, in memory."""
 
@@ -169,6 +179,52 @@ def test_a_queue_row_without_a_limit_or_a_size_is_not_tracked():
     assert track.open_season(_queue_row(sell_closes=None), D0) is None
 
 
+# --- craft-carry simulation -----------------------------------------------
+
+
+def test_a_craft_position_crafts_on_days_the_chain_still_prices():
+    pos = track.open_craft(_chain(), D0)
+    track.tick_craft(pos, _chain(cost=1000, revenue=1300), D0)
+    assert pos["crafted"] == 1
+    assert pos["spent"] == 1000 and pos["revenue"] == 1300
+    assert pos["days"] == 1
+
+
+def test_a_craft_position_skips_a_day_the_chain_stops_pricing():
+    pos = track.open_craft(_chain(), D0)
+    track.tick_craft(pos, _chain(cost=None, revenue=None), D0)
+    assert pos["crafted"] == 0 and pos["days"] == 1
+    track.tick_craft(pos, None, _day(1))
+    assert pos["crafted"] == 0 and pos["days"] == 2
+
+
+def test_a_craft_position_resolves_on_the_weekly_horizon():
+    pos = track.open_craft(_chain(), D0)
+    assert not track.is_done(pos, _day(track.CRAFT_HORIZON_DAYS - 1))
+    assert track.is_done(pos, _day(track.CRAFT_HORIZON_DAYS))
+
+
+def test_close_craft_books_net_against_spend():
+    pos = track.open_craft(_chain(), D0)
+    for n in range(3):
+        track.tick_craft(pos, _chain(cost=1000, revenue=1300), _day(n))
+    rec = track.close_craft(pos, _day(3))
+    assert rec["outcome"] == "closed"
+    assert rec["crafted"] == 3
+    assert rec["spent"] == 3000 and rec["revenue"] == 3900
+    assert rec["net"] == 900
+    assert rec["net_pct"] == 0.3
+    assert rec["strategy"] == "time-gated crafting"
+
+
+def test_close_craft_is_unfilled_when_it_never_priced():
+    pos = track.open_craft(_chain(), D0)
+    track.tick_craft(pos, _chain(cost=None, revenue=None), D0)
+    rec = track.close_craft(pos, _day(1))
+    assert rec["outcome"] == "unfilled"
+    assert rec["net"] == 0 and rec["net_pct"] is None
+
+
 # --- the daily roll ------------------------------------------------------
 
 
@@ -246,6 +302,57 @@ def test_only_buy_now_queue_rows_are_tracked():
     assert [p["id"] for p in state["positions"]] == [8]
 
 
+def test_open_flip_and_open_season_carry_a_strategy_tag():
+    assert track.open_flip(_pick(), D0)["strategy"] == "flip"
+    assert track.open_season(_queue_row(), D0)["strategy"] == "festival carry"
+
+
+# --- craft carry in the daily roll ----------------------------------------
+
+
+def test_a_live_chain_opens_a_craft_position():
+    state, stats = track.roll(_empty(), [], [], {}, D0, crafts=[_chain()])
+    assert stats["opened"] == 1
+    assert [p["kind"] for p in state["positions"]] == ["craft"]
+    assert state["positions"][0]["id"] == "mithrillium"
+    assert state["positions"][0]["strategy"] == "time-gated crafting"
+
+
+def test_a_dead_or_unpriced_chain_does_not_open():
+    crafts = [_chain(dead=True), _chain(key="charged_quartz", dead=None)]
+    state, stats = track.roll(_empty(), [], [], {}, D0, crafts=crafts)
+    assert stats["opened"] == 0
+    assert state["positions"] == []
+
+
+def test_a_chain_already_tracked_is_not_opened_twice():
+    state, _ = track.roll(_empty(), [], [], {}, D0, crafts=[_chain()])
+    state, stats = track.roll(state, [], [], {}, _day(1), crafts=[_chain()])
+    assert stats["opened"] == 0
+    assert len(state["positions"]) == 1
+
+
+def test_an_open_craft_position_ticks_from_the_crafts_list_by_key():
+    state, _ = track.roll(_empty(), [], [], {}, D0, crafts=[_chain()])
+    state, _ = track.roll(
+        state, [], [], {}, _day(1), crafts=[_chain(cost=2000, revenue=2600)]
+    )
+    pos = state["positions"][0]
+    assert pos["crafted"] == 1
+    assert pos["spent"] == 2000 and pos["revenue"] == 2600
+
+
+def test_a_craft_position_closes_on_its_horizon_and_reopens_if_still_live():
+    state, _ = track.roll(_empty(), [], [], {}, D0, crafts=[_chain()])
+    for n in range(1, track.CRAFT_HORIZON_DAYS + 1):
+        state, stats = track.roll(state, [], [], {}, _day(n), crafts=[_chain()])
+    assert stats["closed"] == 1 and stats["opened"] == 1
+    assert [r["outcome"] for r in state["records"]] == ["closed"]
+    assert state["records"][0]["crafted"] == track.CRAFT_HORIZON_DAYS
+    assert len(state["positions"]) == 1
+    assert state["positions"][0]["days"] == 0  # reopened fresh the same day
+
+
 # --- summary and page ----------------------------------------------------
 
 
@@ -268,23 +375,38 @@ def test_summary_counts_outcomes_and_compares_against_the_assumption():
     assert s["flip"]["net"] == 692
     assert s["flip"]["med_capture_needed"] == 0.25
     assert s["flip"]["capture_assumed"] == track.CAPTURE
-    assert s["open"] == {"flip": 0, "season": 0}
+    assert s["open"] == {"flip": 0, "season": 0, "craft": 0}
 
 
 def test_summary_of_an_empty_record_is_all_zeroes():
     s = track.summarize(_empty())
     assert s["flip"]["n"] == 0 and s["flip"]["net_pct"] is None
     assert s["season"]["med_ret"] is None
+    assert s["craft"]["n"] == 0 and s["craft"]["net_pct"] is None
+
+
+def test_summary_counts_resolved_craft_weeks():
+    state, _ = track.roll(_empty(), [], [], {}, D0, crafts=[_chain()])
+    state, _ = track.roll(state, [], [], {}, _day(1), crafts=[_chain()])
+    state, _ = track.roll(state, [], [], {}, _day(track.CRAFT_HORIZON_DAYS))
+    s = track.summarize(state)
+    assert s["craft"]["n"] == 1
+    assert s["craft"]["completed"] == 1
+    assert s["craft"]["net"] == 300  # 1 crafted day at cost 1000, revenue 1300
+    assert s["craft"]["net_pct"] == 0.3
 
 
 def test_the_page_renders_every_placeholder():
     state = _resolved_state()
     state["positions"].append(track.open_season(_queue_row(), D0))
+    state["positions"].append(track.open_craft(_chain(), D0))
     html = track.render(state, track.summarize(state), "2026-08-08 04:20 UTC")
     for placeholder in ("GENERATED", "SINCE", "OPEN", "SCORE", "FLIPS",
-                        "SEASON_META", "SEASON_OPEN", "SEASON_CLOSED"):
+                        "SEASON_META", "SEASON_OPEN", "SEASON_CLOSED",
+                        "CRAFT_META", "CRAFT_OPEN", "CRAFT_CLOSED"):
         assert f"__{placeholder}__" not in html
     assert "Test Item" in html and "Season Item" in html
+    assert "Deldrimor Steel Ingot" in html
     assert "Capture needed" in html
     assert "2026-08-08 04:20 UTC" in html
 
@@ -351,6 +473,24 @@ def test_main_without_a_report_does_nothing(tmp_path, monkeypatch):
     store = FakeStore()
     track.main(store=store, snapshot=[_row()], today=D0)
     assert store.objects == {}
+
+
+def test_main_opens_a_craft_position_from_the_stored_series(tmp_path, monkeypatch):
+    _site(tmp_path, monkeypatch, picks=[], queue=[])
+    store = FakeStore({track.CRAFT_KEY: {"points": [{"d": D0.isoformat(),
+                                                       "chains": [_chain()]}]}})
+    track.main(store=store, snapshot=[_row()], today=D0)
+
+    positions = store.objects[track.OPEN_KEY]["positions"]
+    assert len(positions) == 1
+    assert positions[0]["kind"] == "craft" and positions[0]["id"] == "mithrillium"
+
+
+def test_main_tolerates_a_missing_craft_series(tmp_path, monkeypatch):
+    _site(tmp_path, monkeypatch)
+    store = FakeStore()
+    track.main(store=store, snapshot=[_row()], today=D0)
+    assert all(p["kind"] != "craft" for p in store.objects[track.OPEN_KEY]["positions"])
 
 
 def test_main_tolerates_a_missing_action_queue(tmp_path, monkeypatch):

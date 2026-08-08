@@ -36,6 +36,25 @@ def bench():
     }
 
 
+def _chain(key, name, output_id, cost, revenue=None, spread=None, dead=None):
+    return {"key": key, "name": name, "output_id": output_id, "cost": cost,
+            "revenue": revenue, "spread": spread, "dead": dead}
+
+
+def craft_series():
+    live = _chain("mithrillium", "Lump of Mithrillium -> Deldrimor Steel Ingot",
+                   46738, 19277, 25492, 0.3224, False)
+    dead = _chain("mithrillium", "Lump of Mithrillium -> Deldrimor Steel Ingot",
+                   46738, 19000, 19500, 0.026, True)
+    quartz = _chain("charged_quartz", "Charged Quartz Crystal", None, 850)
+    return {
+        "points": [
+            {"d": "2026-08-07", "chains": [live, quartz]},
+            {"d": "2026-08-08", "chains": [dead, quartz]},
+        ]
+    }
+
+
 def test_nav_series_is_published_rebased_with_shares_only():
     pub = invest.nav_public(nav_series())
     assert pub["levels"][0] == 100.0
@@ -68,16 +87,65 @@ def test_render_with_no_artifacts_is_a_complete_empty_state_page():
     html = invest.render(payload)
     assert "no benchmark artifact yet" in html
     assert "No NAV series yet" in html
+    assert "No craft-carry artifact yet" in html
     for placeholder in ("__GENERATED__", "__META__", "__RETURNS__", "__CAPS__",
-                        "__EXPOSURE__", "__CONSTITUENTS__", "__DATA__"):
+                        "__EXPOSURE__", "__CONSTITUENTS__", "__CRAFT__", "__DATA__"):
         assert placeholder not in html
 
 
 def test_render_with_artifacts_carries_series_and_tables():
-    payload = invest.build_payload(bench(), nav_series(), 2_200_000)
+    payload = invest.build_payload(bench(), nav_series(), 2_200_000, craft_series())
     html = invest.render(payload)
     assert "Glob of Ectoplasm" in html
     assert "Portfolio NAV" in html
     assert payload["bench"]["index"]["start"] in html
     assert "+10.0%" in html  # the index 30d return from the artifact
     assert payload["nav"]["levels"][-1] == 110.0
+    assert "Deldrimor Steel Ingot" in html
+    assert "Charged Quartz Crystal" in html
+
+
+# --- craft carry ---------------------------------------------------------
+
+
+def test_craft_rows_reads_the_latest_point_and_tallies_trailing_live_days():
+    rows = invest.craft_rows(craft_series())
+    by_key = {r["key"]: r for r in rows}
+    mith = by_key["mithrillium"]
+    assert mith["dead"] is True  # the latest point, not the first
+    assert mith["tracked_days"] == 2
+    assert mith["live_days"] == 1  # only the first day cleared the hurdle
+    quartz = by_key["charged_quartz"]
+    assert quartz["output_id"] is None
+    assert quartz["tracked_days"] == 0 and quartz["live_days"] == 0
+
+
+def test_craft_rows_windows_to_the_trailing_period():
+    rows = invest.craft_rows(craft_series(), window=1)
+    mith = next(r for r in rows if r["key"] == "mithrillium")
+    assert mith["tracked_days"] == 1
+    assert mith["live_days"] == 0  # the windowed-out day was the live one
+
+
+def test_craft_rows_is_empty_without_an_artifact():
+    assert invest.craft_rows(None) == []
+    assert invest.craft_rows({"points": []}) == []
+
+
+def test_craft_status_labels_every_case():
+    live = _chain("a", "A", 1, 100, 200, 0.3, False)
+    dead = _chain("a", "A", 1, 100, 105, 0.05, True)
+    unpriced = _chain("a", "A", 1, 100)
+    no_output = _chain("a", "A", None, 100)
+    assert invest.craft_status(live) == ("live", "live")
+    assert invest.craft_status(dead) == ("dead", "dead")
+    assert invest.craft_status(unpriced) == ("unpriced", "na")
+    assert invest.craft_status(no_output) == ("no tradable output", "na")
+
+
+def test_craft_table_shows_cost_revenue_and_status():
+    payload = invest.build_payload(None, None, None, craft_series())
+    html = invest.craft_table(payload)
+    assert "carry-dead" in html  # latest mithrillium reading is dead
+    assert "1/2" in html  # live days over tracked days
+    assert "no tradable output" in html  # charged quartz has none
