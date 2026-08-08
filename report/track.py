@@ -747,6 +747,7 @@ td a:hover { text-decoration: underline; }
 <div class="meta">
 Generated __GENERATED__ &middot; tracking since __SINCE__ &middot; __OPEN__
 &middot; <a href="track.json">json</a> &middot; <a href="index.html">report</a>
+&middot; <a href="invest.html">benchmarks</a>
 &middot; <a href="https://github.com/PetrCala/gw2-advisor">source</a>
 </div>
 <p>Every day's picks are opened as paper positions and replayed against the

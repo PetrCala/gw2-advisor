@@ -71,6 +71,13 @@ Paper trading (#30, `report/track.py`, a non-gating report.yml step): each build
 
 Follow-ups (post-M4, issue-tracked): timing verdicts, pay-up-to ceiling, suggested quantity, action queue and festival countdown on the report, published as `actions.json` (#16); notifications on queue transitions (#17); holdings-aware personal queue as M5 (#18). Verdicts recompute at every report build against the fresh snapshot; the weekly artifact only carries the pattern evidence.
 
-### M6: long-horizon investment book (design)
+### M6: long-horizon investment book
 
 Capital-scaling layer: strategies holding weeks to years (release basket, patch-event theses, festival carry at size, luxury market making, vault holds, corners, structural-bound arbitrage, time-gated carry, guarded reversal, release-lifecycle cohorts), a bankroll/risk framework, and a turnover-weighted market index to benchmark against. Full design and sub-milestones M6.a-M6.e in [INVESTING.md](INVESTING.md); supporting research inventory in [RESEARCH.md](RESEARCH.md).
+
+M6.a foundations (built). Decisions:
+
+- Market index (`invest/index.py`, weekly invest.yml, Mondays 01:40 UTC): turnover-weighted daily index over the trailing top 500 items, constituents and weights rebalanced monthly from prior-month sell-side turnover, single item capped at 5% (ecto alone is ~15% of turnover), relatives clipped 0.1-10x against data glitches, levels renormalized over whatever traded each day. Artifact `invest/bench.json.gz` also carries the full ecto series (to 2012) and the gem rate (gw2tp history to 2013 plus the official spot).
+- The index starts mid-2019, not 2013 as designed: datawars2 rows before then carry only price extremes, no fills and no quantities (verified empirically), so turnover weighting cannot reach further back and no other weighting is defensible either. The ecto and gem lines carry the older context.
+- NAV series (`invest/nav.py`, daily in report.yml): one point per UTC day, the whole account (via `account.snapshot.gather`) valued at dump-into-bid net of fees, stock broken down by material class (`invest/tags.py`: T6, festival, staples, luxury by 500g+ price rule). Needs a GW2_API_KEY repository secret; skips cleanly without one. Absolute gold lives only in the private bucket; the public page (`report/invest.py`, site/invest.html) rebases NAV to 100 and shows shares, never gold.
+- Bankroll is a repository Actions variable (BANKROLL_G), not a file in the public repo; `invest/bankroll.py` holds the per-strategy allocation caps (release 30%, festival 25%, luxury 25%, vault 15%, corners 10%), which start binding when strategies emit positions (M6.b+).
