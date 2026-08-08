@@ -40,6 +40,29 @@ def fetch_all_prices(session=None):
     return items
 
 
+def fetch_prices(item_ids, session=None):
+    """Return {item_id: [buy_price, buy_qty, sell_price, sell_qty]} for just
+    `item_ids`, the same shape as fetch_all_prices but scoped to a small,
+    known set (invest.craft's recipe inputs) instead of the whole ~27k
+    table. Ids with no commerce listing (account-bound materials, mainly)
+    are simply absent from the result.
+    """
+    s = session or requests.Session()
+    items = {}
+    ids = list(item_ids)
+    for i in range(0, len(ids), PAGE_SIZE):
+        chunk = ids[i : i + PAGE_SIZE]
+        rows = _get_json(s, PRICES_URL, params={"ids": ",".join(map(str, chunk))})
+        for r in rows:
+            items[r["id"]] = [
+                r["buys"]["unit_price"],
+                r["buys"]["quantity"],
+                r["sells"]["unit_price"],
+                r["sells"]["quantity"],
+            ]
+    return items
+
+
 def fetch_listings(item_ids, session=None):
     """Return {item_id: {"buys": [[price, qty], ...], "sells": [[price, qty], ...]}}.
 

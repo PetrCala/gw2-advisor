@@ -41,9 +41,17 @@ jobs:
         env:
           S3_BUCKET: ${{ vars.S3_BUCKET }}
           GW2_API_KEY: ${{ secrets.GW2_API_KEY }}
+      # One craft-carry spread point per day (S8); report.track reads it below.
+      - run: python -m invest.craft
+        continue-on-error: true
+        env:
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
+      # Festival sizing reads BANKROLL_G (season.actions.enrich_all); unset
+      # degrades cleanly to the flat SEASON_CAPITAL default.
       - run: python -m report.build
         env:
           S3_BUCKET: ${{ vars.S3_BUCKET }}
+          BANKROLL_G: ${{ vars.BANKROLL_G }}
       # Notifications refine the report, they don't gate it.
       - run: python -m report.notify
         continue-on-error: true

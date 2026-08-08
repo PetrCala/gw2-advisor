@@ -22,13 +22,16 @@ from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 
+from account.pnl import gold
 from invest import bankroll, tags
+from invest.craft import CRAFT_KEY
 from invest.index import BENCH_KEY, trailing_return
 from invest.nav import NAV_KEY
 
 SITE = Path(__file__).resolve().parent.parent / "site"
 
 WINDOWS = (("30d", 30), ("90d", 90), ("365d", 365), ("all", 36500))
+CRAFT_EVIDENCE_DAYS = 30  # trailing window for the "live X of Y days" tally
 
 CLASS_LABELS = {
     "t6": "T6 fine mats",
@@ -110,7 +113,36 @@ def exposure_rows(nav, bankroll_copper):
     return rows
 
 
-def build_payload(bench, nav, bankroll_copper):
+def craft_rows(series, window=CRAFT_EVIDENCE_DAYS):
+    """Latest reading per refinement plus a trailing live/dead tally.
+
+    live_days counts points in the trailing `window` where the chain priced
+    a spread at or above the tax hurdle; tracked_days counts points where it
+    priced at all (Charged Quartz Crystal never does, by design, so both
+    stay 0 for it). An empty series returns [].
+    """
+    points = (series or {}).get("points") or []
+    if not points:
+        return []
+    recent = points[-window:]
+    rows = []
+    for c in points[-1]["chains"]:
+        history = [
+            next((x for x in p["chains"] if x["key"] == c["key"]), None)
+            for p in recent
+        ]
+        priced = [h for h in history if h and h.get("dead") is not None]
+        rows.append(
+            {
+                **c,
+                "tracked_days": len(priced),
+                "live_days": sum(1 for h in priced if not h["dead"]),
+            }
+        )
+    return rows
+
+
+def build_payload(bench, nav, bankroll_copper, craft_series=None):
     nav_pub = nav_public(nav)
     return {
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -132,6 +164,7 @@ def build_payload(bench, nav, bankroll_copper):
         ],
         "bankroll_set": bool(bankroll_copper),
         "exposure": exposure_rows(nav, bankroll_copper),
+        "craft": craft_rows(craft_series),
     }
 
 
@@ -241,6 +274,44 @@ def constituents_table(payload):
     )
 
 
+def craft_status(r):
+    """(label, css class) for one craft-carry row's status cell."""
+    if r["dead"] is None:
+        return ("no tradable output", "na") if r["output_id"] is None else ("unpriced", "na")
+    return ("dead", "dead") if r["dead"] else ("live", "live")
+
+
+def craft_table(payload):
+    rows = payload.get("craft") or []
+    if not rows:
+        return (
+            "<p>No craft-carry artifact yet; the daily invest.craft step "
+            "fills this in.</p>"
+        )
+    cells = []
+    for r in rows:
+        label, cls = craft_status(r)
+        live = f"{r['live_days']}/{r['tracked_days']}" if r["tracked_days"] else ""
+        name = escape(r["name"])
+        if r["output_id"]:
+            name = f'<a href="https://www.gw2bltc.com/en/item/{r["output_id"]}">{name}</a>'
+        cells.append(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td>"
+            '<td class="carry-{}">{}</td><td>{}</td></tr>'.format(
+                name,
+                gold(r["cost"]) if r["cost"] is not None else "",
+                gold(r["revenue"]) if r["revenue"] is not None else "",
+                pct(r["spread"], 1) if r["spread"] is not None else "",
+                cls, label, live,
+            )
+        )
+    return (
+        "<table><thead><tr><th>Refinement</th><th>Cost</th><th>Sell</th>"
+        f"<th>Spread</th><th>Status</th><th>Live days ({CRAFT_EVIDENCE_DAYS}d)"
+        f"</th></tr></thead><tbody>{''.join(cells)}</tbody></table>"
+    )
+
+
 def render(payload):
     bench = payload.get("bench")
     if bench and bench.get("index"):
@@ -259,6 +330,7 @@ def render(payload):
     html = html.replace("__CAPS__", caps_table(payload))
     html = html.replace("__EXPOSURE__", exposure_table(payload))
     html = html.replace("__CONSTITUENTS__", constituents_table(payload))
+    html = html.replace("__CRAFT__", craft_table(payload))
     # </ would end the script block early if an item name ever carried it
     html = html.replace("__DATA__", json.dumps(payload).replace("</", "<\\/"))
     return html
@@ -266,21 +338,23 @@ def render(payload):
 
 def main():
     local = "--local" in sys.argv
-    bench = nav = None
+    bench = nav = craft_series = None
     if not local:
         from collector.s3store import Store
 
         store = Store(os.environ["S3_BUCKET"])
         bench = store.get_json_gz(BENCH_KEY)
         nav = store.get_json_gz(NAV_KEY)
+        craft_series = store.get_json_gz(CRAFT_KEY)
 
-    payload = build_payload(bench, nav, bankroll.bankroll_copper())
+    payload = build_payload(bench, nav, bankroll.bankroll_copper(), craft_series)
     SITE.mkdir(exist_ok=True)
     (SITE / "invest.json").write_text(json.dumps(payload, indent=1), encoding="utf-8")
     (SITE / "invest.html").write_text(render(payload), encoding="utf-8")
     print(
         f"benchmarks page (index: {'yes' if bench else 'no'}, "
-        f"nav points: {len((nav or {}).get('points') or [])}) "
+        f"nav points: {len((nav or {}).get('points') or [])}, "
+        f"craft points: {len((craft_series or {}).get('points') or [])}) "
         f"-> {SITE / 'invest.html'}"
     )
 
@@ -320,6 +394,7 @@ td a:hover { text-decoration: underline; }
             vertical-align: middle; border-radius: 2px; }
 svg text { fill: #8a8f9c; font-size: 11px; }
 svg .grid { stroke: #2a2e38; stroke-width: 1; }
+.carry-live { color: #7ec97f; } .carry-dead { color: #8a8f9c; } .carry-na { color: #8a8f9c; }
 .notes { color: #8a8f9c; font-size: 13px; margin-top: 24px; }
 .notes ul { margin: 6px 0; padding-left: 20px; }
 </style>
@@ -347,6 +422,13 @@ __RETURNS__
 __EXPOSURE__
 <h2>Allocation caps</h2>
 __CAPS__
+<h2>Time-gated craft carry</h2>
+<p>Four of the five daily-cooldown Mystic Forge materials are account-bound
+themselves but refine, uncapped, straight into a tradable tier-7 material;
+the fifth, Charged Quartz Crystal, has no single tradable next step and is
+tracked for its input cost only. A carry is marked dead once its spread
+drops under the 15% tax itself, not just below zero.</p>
+__CRAFT__
 __CONSTITUENTS__
 <div class="notes">
 <ul>
@@ -361,6 +443,11 @@ percentages.</li>
 <li>The gem line is the cost of buying 100 gems with gold (gw2tp history
 plus the official exchange spot). It is the closest thing to an outside
 inflation gauge, not a tradable series: the round trip loses ~35%.</li>
+<li>Craft carry cost and sell are one order-width inside the book (buy 1
+above the best bid, sell 1 below the best ask), the same queue-front
+convention as the daily flip table, revenue net of the 15% cut. Live days
+counts trailing days the spread cleared the tax hurdle, out of days it
+priced at all.</li>
 </ul>
 </div>
 <script>

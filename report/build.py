@@ -19,6 +19,7 @@ from pathlib import Path
 
 from collector import dw2, gw2api
 from features import reprice
+from invest import bankroll
 from scorers import flip, flip_actions
 from season import actions as season_actions
 from season import score as season_score
@@ -132,10 +133,12 @@ SEASONAL_ASSUMPTIONS = {
     f"(1 + {season_actions.RETURN_HURDLE:.0%} hurdle); suggested qty = "
     f"{season_actions.CAPTURE:.0%} of the buy-window flow over its remaining "
     f"days, capped by the same share of the sell window (exit liquidity), by "
-    f"{season_actions.SEASON_CAPITAL // 10000}g of capital per pick, and by "
-    f"whatever the live buy book can absorb without the exit floor below "
-    f"({season_actions.EXIT_FLOOR_MIN:.0%}); windows with no observed flow "
-    "fall back to recent overall daily flow, marked est",
+    f"the festival bankroll cap ({bankroll.CAPS['festival carry']:.0%} of "
+    f"BANKROLL_G) split across picks currently buying or opening soon, or "
+    f"{season_actions.SEASON_CAPITAL // 10000}g per pick without a configured "
+    "bankroll, and by whatever the live buy book can absorb without the exit "
+    f"floor below ({season_actions.EXIT_FLOOR_MIN:.0%}); windows with no "
+    "observed flow fall back to recent overall daily flow, marked est",
     "exit": "exit % is the loss per unit if the suggested lot were dumped into "
     "today's buy book instead of waiting for the peak, fetched live for the picks "
     "inside a buy or sell window; suggested qty is shrunk first to keep that loss "
@@ -228,9 +231,9 @@ def main():
             for it in snap
         }
         today = datetime.now(timezone.utc).date()
-        for p in seasonal["picks"]:
-            price, flow = fresh.get(p["id"], (None, None))
-            season_actions.enrich(p, today, price, flow)
+        season_actions.enrich_all(
+            seasonal["picks"], today, fresh, bankroll.bankroll_copper()
+        )
         festivals = season_actions.next_festivals(today, seasonal["picks"])
         add_exit_floor(seasonal["picks"])
 
