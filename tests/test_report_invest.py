@@ -36,6 +36,24 @@ def bench():
     }
 
 
+def luxury_doc():
+    return {
+        "generated": "2026-08-08T03:50:00Z",
+        "through": "2026-08-08",
+        "universe_n": 121,
+        "picks": [
+            {
+                "id": 82044, "name": "Chak Infusion", "rarity": "Ascended",
+                "strategy": "luxury desk", "best_bid": 7_400_000, "best_ask": 7_900_000,
+                "buy_at": 7_450_001, "sell_at": 7_799_999, "margin": 200_000,
+                "margin_pct": 0.2233, "qty": 2, "capital": 14_900_002,
+                "entry_flow_week": 1.5, "exit_flow_week": 1.0,
+                "round_trip_days": 16.0, "ev_week": 87_500.0,
+            }
+        ],
+    }
+
+
 def test_nav_series_is_published_rebased_with_shares_only():
     pub = invest.nav_public(nav_series())
     assert pub["levels"][0] == 100.0
@@ -63,21 +81,36 @@ def test_exposure_uses_the_bankroll_when_configured():
     assert all(r["bankroll_share"] is None for r in rows)
 
 
+def test_luxury_public_passes_through_picks_and_meta():
+    pub = invest.luxury_public(luxury_doc())
+    assert pub["universe_n"] == 121
+    assert pub["through"] == "2026-08-08"
+    assert pub["picks"][0]["id"] == 82044
+
+
+def test_luxury_public_is_none_without_picks():
+    assert invest.luxury_public(None) is None
+    assert invest.luxury_public({"picks": []}) is None
+
+
 def test_render_with_no_artifacts_is_a_complete_empty_state_page():
-    payload = invest.build_payload(None, None, None)
+    payload = invest.build_payload(None, None, None, None)
     html = invest.render(payload)
     assert "no benchmark artifact yet" in html
     assert "No NAV series yet" in html
+    assert "No luxury desk artifact yet" in html
     for placeholder in ("__GENERATED__", "__META__", "__RETURNS__", "__CAPS__",
-                        "__EXPOSURE__", "__CONSTITUENTS__", "__DATA__"):
+                        "__EXPOSURE__", "__CONSTITUENTS__", "__LUXURY__", "__DATA__"):
         assert placeholder not in html
 
 
 def test_render_with_artifacts_carries_series_and_tables():
-    payload = invest.build_payload(bench(), nav_series(), 2_200_000)
+    payload = invest.build_payload(bench(), nav_series(), luxury_doc(), 2_200_000)
     html = invest.render(payload)
     assert "Glob of Ectoplasm" in html
     assert "Portfolio NAV" in html
     assert payload["bench"]["index"]["start"] in html
     assert "+10.0%" in html  # the index 30d return from the artifact
     assert payload["nav"]["levels"][-1] == 110.0
+    assert "Chak Infusion" in html
+    assert "121" in html  # universe size in the luxury desk meta line

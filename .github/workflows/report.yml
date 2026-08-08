@@ -41,6 +41,11 @@ jobs:
         env:
           S3_BUCKET: ${{ vars.S3_BUCKET }}
           GW2_API_KEY: ${{ secrets.GW2_API_KEY }}
+      # Daily luxury desk book collection and picks (M6.c); no API key needed.
+      - run: python -m invest.luxury
+        continue-on-error: true
+        env:
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
       - run: python -m report.build
         env:
           S3_BUCKET: ${{ vars.S3_BUCKET }}

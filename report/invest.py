@@ -4,15 +4,20 @@ Usage:
     python -m report.invest             # reads the invest/ artifacts from S3
     python -m report.invest --local     # renders the empty-state page, no AWS
 
-Reads the weekly index artifact (invest/bench.json.gz) and the daily NAV
-series (invest/nav.json.gz) and renders the "are we ahead of the market"
+Reads the weekly index artifact (invest/bench.json.gz), the daily NAV
+series (invest/nav.json.gz) and the daily luxury desk artifact
+(invest/luxury/latest.json.gz) and renders the "are we ahead of the market"
 page: benchmark lines (index, raw gold, ecto, gem rate), the NAV line, the
-allocation caps, and the holdings class breakdown.
+allocation caps, the holdings class breakdown, and today's luxury desk
+picks (docs/INVESTING.md strategy S4).
 
 Privacy rule: the NAV series is stored in the private bucket in absolute
 gold, but everything published here is rebased to 100 or expressed as a
 percentage, so the public page never carries absolute wealth. The bankroll
-(BANKROLL_G) is used only as a denominator for the same reason.
+(BANKROLL_G) is used only as a denominator for the same reason. The luxury
+desk table is an exception by design, the same way the flip report shows
+prices: buy/sell/capital there are market data and a recommendation, not
+the user's own holdings, so showing them in gold is not a wealth leak.
 """
 
 import json
@@ -22,8 +27,9 @@ from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 
-from invest import bankroll, tags
+from invest import bankroll, luxury, tags
 from invest.index import BENCH_KEY, trailing_return
+from invest.luxury import LUXURY_KEY
 from invest.nav import NAV_KEY
 
 SITE = Path(__file__).resolve().parent.parent / "site"
@@ -110,7 +116,19 @@ def exposure_rows(nav, bankroll_copper):
     return rows
 
 
-def build_payload(bench, nav, bankroll_copper):
+def luxury_public(doc):
+    """The publishable slice of the luxury desk artifact, or None without one."""
+    if not doc or not doc.get("picks"):
+        return None
+    return {
+        "generated": doc.get("generated"),
+        "through": doc.get("through"),
+        "universe_n": doc.get("universe_n"),
+        "picks": doc.get("picks"),
+    }
+
+
+def build_payload(bench, nav, luxury_doc, bankroll_copper):
     nav_pub = nav_public(nav)
     return {
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -126,6 +144,7 @@ def build_payload(bench, nav, bankroll_copper):
         if bench
         else None,
         "nav": nav_pub,
+        "luxury": luxury_public(luxury_doc),
         "caps": [
             {"strategy": r["strategy"], "cap_pct": r["cap_pct"]}
             for r in bankroll.cap_table()
@@ -141,6 +160,18 @@ def pct(v, digits=1):
 
 def share(v, digits=1):
     return "" if v is None else f"{100 * v:.{digits}f}%"
+
+
+def money(c):
+    """Copper as the same colored g/s/c spans the flip and track pages use."""
+    c = int(round(c))
+    g, s, k = c // 10000, c % 10000 // 100, c % 100
+    out = ""
+    if g:
+        out += f'<span class="g">{g:,}g</span>&thinsp;'
+    if g or s:
+        out += f'<span class="s">{s}s</span>&thinsp;'
+    return out + f'<span class="c">{k}c</span>'
 
 
 def returns_table(payload):
@@ -186,8 +217,9 @@ def caps_table(payload):
     return (
         "<table><thead><tr><th>Strategy</th><th>Cap, share of bankroll</th></tr>"
         f"</thead><tbody>{rows}</tbody></table>"
-        "<p>Caps bind at entry time once strategies emit positions (M6.b "
-        "onward); flips are uncapped because their capital is self-limiting."
+        "<p>Caps bind at entry time once strategies emit positions (M6.c's "
+        "luxury desk onward); flips are uncapped because their capital is "
+        "self-limiting."
         f"</p>{note}"
     )
 
@@ -241,6 +273,36 @@ def constituents_table(payload):
     )
 
 
+def luxury_table(payload):
+    lux = payload.get("luxury")
+    if not lux:
+        return (
+            "<p>No luxury desk artifact yet; the daily invest.luxury step "
+            "fills this in once it has collected an order book.</p>"
+        )
+    rows = lux.get("picks") or []
+    cells = "".join(
+        "<tr><td><a href=\"https://www.gw2bltc.com/en/item/{}\">{}</a></td>"
+        "<td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>"
+        "<td>{}</td><td>{}</td></tr>".format(
+            p["id"], escape(p["name"]), money(p["buy_at"]), money(p["sell_at"]),
+            share(p["margin_pct"]), p["qty"], money(p["capital"]),
+            f"{p['entry_flow_week']:g}/wk", f"{p['exit_flow_week']:g}/wk",
+        )
+        for p in rows
+    )
+    meta = (
+        f"{lux.get('universe_n', 0):,} items in the tracked universe, "
+        f"{len(rows)} priced with a placeable margin, as of {lux.get('through', '?')}"
+    )
+    return (
+        f"<p>{meta}</p>"
+        "<table><thead><tr><th>Item</th><th>Bid at</th><th>Ask at</th>"
+        "<th>Margin</th><th>Qty</th><th>Capital</th><th>Entry flow</th>"
+        f"<th>Exit flow</th></tr></thead><tbody>{cells}</tbody></table>"
+    )
+
+
 def render(payload):
     bench = payload.get("bench")
     if bench and bench.get("index"):
@@ -259,6 +321,7 @@ def render(payload):
     html = html.replace("__CAPS__", caps_table(payload))
     html = html.replace("__EXPOSURE__", exposure_table(payload))
     html = html.replace("__CONSTITUENTS__", constituents_table(payload))
+    html = html.replace("__LUXURY__", luxury_table(payload))
     # </ would end the script block early if an item name ever carried it
     html = html.replace("__DATA__", json.dumps(payload).replace("</", "<\\/"))
     return html
@@ -266,21 +329,23 @@ def render(payload):
 
 def main():
     local = "--local" in sys.argv
-    bench = nav = None
+    bench = nav = luxury_doc = None
     if not local:
         from collector.s3store import Store
 
         store = Store(os.environ["S3_BUCKET"])
         bench = store.get_json_gz(BENCH_KEY)
         nav = store.get_json_gz(NAV_KEY)
+        luxury_doc = store.get_json_gz(LUXURY_KEY)
 
-    payload = build_payload(bench, nav, bankroll.bankroll_copper())
+    payload = build_payload(bench, nav, luxury_doc, bankroll.bankroll_copper())
     SITE.mkdir(exist_ok=True)
     (SITE / "invest.json").write_text(json.dumps(payload, indent=1), encoding="utf-8")
     (SITE / "invest.html").write_text(render(payload), encoding="utf-8")
     print(
         f"benchmarks page (index: {'yes' if bench else 'no'}, "
-        f"nav points: {len((nav or {}).get('points') or [])}) "
+        f"nav points: {len((nav or {}).get('points') or [])}, "
+        f"luxury picks: {len((luxury_doc or {}).get('picks') or [])}) "
         f"-> {SITE / 'invest.html'}"
     )
 
@@ -307,6 +372,7 @@ td:first-child, th:first-child { text-align: left; }
 tbody tr:nth-child(odd) { background: #1b1e25; }
 td a { color: inherit; text-decoration: none; }
 td a:hover { text-decoration: underline; }
+.g { color: #e5c07b; } .s { color: #b4b9c4; } .c { color: #b87352; }
 .chartbox { background: #1b1e25; border: 1px solid #3a3f4b; border-radius: 6px;
             padding: 10px 12px; margin: 10px 0; }
 .controls { margin: 4px 0 8px; color: #aab0bd; font-size: 13px; }
@@ -361,6 +427,29 @@ percentages.</li>
 <li>The gem line is the cost of buying 100 gems with gold (gw2tp history
 plus the official exchange spot). It is the closest thing to an outside
 inflation gauge, not a tradable series: the round trip loses ~35%.</li>
+</ul>
+</div>
+<h2>Luxury desk</h2>
+<p>Strategy S4: the 500g+ tier trades at wide spreads on 1-5 sales a week,
+too thin for the flip crowd to size. Bid at, sell at are today's patient
+placements, gap-walked into the live book the same way the flip table's
+prices are; qty is capped by this item's own exit flow over a 30-day
+horizon and by a few units per item so the book stays spread across names.
+Picks open as paper positions on <a href="track.html">the track record
+page</a> under the luxury desk strategy tag.</p>
+__LUXURY__
+<div class="notes">
+<ul>
+<li>Universe: items priced 500g or more with at least one sale in the
+trailing week, minus a small curated exclusion list (generation-1
+precursors, policy-broken since 2023), recomputed daily from the same
+mirror snapshot the flip table uses.</li>
+<li>Entry/exit flow blends the 7-day and 1-month rolling fill counts so one
+heavy or dead day cannot swing an estimate this thin; margin is net of the
+15% cut and only clears the desk at 10% or better.</li>
+<li>An order that sits unfilled past three weeks is repriced or withdrawn
+by rule (docs/INVESTING.md S4), not judgment; the paper track record flags
+this as a stale position rather than a missed sale.</li>
 </ul>
 </div>
 <script>

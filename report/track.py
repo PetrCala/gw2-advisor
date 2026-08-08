@@ -16,6 +16,13 @@ The simulation, stated plainly:
 - A seasonal pick buys off listings on the days the ask sits under its
   pay-up-to ceiling, and is marked out over the prices observed inside its
   sell window.
+- A luxury desk pick (docs/INVESTING.md S4) fills its patient bid and
+  relist ask the same way a flip's legs do, at the same capture assumption,
+  just against a much longer horizon (LUXURY_HORIZON_DAYS) matching this
+  tier's weeks-long round trips. The daily snapshot row carries no order
+  book, so a position that goes stale past invest.luxury.PATIENCE_DAYS is
+  flagged (went_stale) rather than actually repriced mid-simulation; the
+  live reprice happens in invest.luxury.build_picks at collection time.
 
 What that measures, and what it cannot. Fills are simulated, so this is not
 a measurement of our own share of the flow: nothing short of trading real
@@ -38,8 +45,9 @@ to the notify state and under the same never-gate-the-deploy rule.
 Usage:
     python -m report.track    # needs S3_BUCKET; runs after report.build
 
-It reads the freshly built site/data.json and site/actions.json and costs one
-extra datawars2 snapshot request a day, the same one the build makes.
+It reads the freshly built site/data.json and site/actions.json, the luxury
+desk artifact from S3 (invest/luxury/latest.json.gz, non-fatally), and costs
+one extra datawars2 snapshot request a day, the same one the build makes.
 """
 
 import json
@@ -50,6 +58,7 @@ from html import escape
 from pathlib import Path
 from statistics import median
 
+from invest import luxury
 from scorers import flip
 
 SITE = Path(__file__).resolve().parent.parent / "site"
@@ -62,7 +71,9 @@ CAPTURE = flip.CAPTURE  # the assumption under test, read from the scorer itself
 
 FLIP_HORIZON_DAYS = 7  # a 2-day predicted round trip gets a week to happen
 SEASON_HORIZON_DAYS = 400  # one full cycle plus slack, then mark it out
+LUXURY_HORIZON_DAYS = 70  # entry patience (21d) + exit sizing horizon (30d) + slack
 FLIP_PER_DAY = flip.TOP_N  # the picks as published, no wider
+LUXURY_PER_DAY = 20  # S4 sizing: 10-20 items concurrently
 OPEN_CAP = 800  # backstop on state size; the horizons bound it well below this
 CLOSED_CAP = 400
 TABLE_ROWS = 40  # rows rendered per table; the json carries everything
@@ -157,6 +168,36 @@ def open_season(row, today):
     }
 
 
+def open_luxury(pick, today):
+    """A luxury desk pick (invest.luxury.build_picks) as a paper position."""
+    return {
+        "v": SCHEMA,
+        "kind": "luxury",
+        "id": pick["id"],
+        "name": pick.get("name") or f"item {pick['id']}",
+        "rarity": pick.get("rarity") or "",
+        "strategy": pick.get("strategy") or luxury.STRATEGY,
+        "opened": today.isoformat(),
+        "buy_at": pick["buy_at"],
+        "sell_at": pick["sell_at"],
+        "qty": pick["qty"],
+        "margin": pick["margin"],
+        "days": 0,
+        "filled": 0.0,
+        "sold": 0.0,
+        "spent": 0.0,
+        "revenue": 0.0,
+        "buy_front_days": 0,
+        "sell_front_days": 0,
+        "filled_day": None,
+        "sold_day": None,
+        "went_stale": False,
+        "last_bid": None,
+        "last_ask": None,
+        "last_tick": None,
+    }
+
+
 # --- daily observation ---------------------------------------------------
 
 
@@ -217,19 +258,59 @@ def tick_season(pos, row, today):
         pos["window_sum"] += ask
 
 
-TICKS = {"flip": tick_flip, "season": tick_season}
+def tick_luxury(pos, row, today):
+    """Advance one luxury position by a day: the same fill mechanic as
+    tick_flip, at this tier's own patience horizon. The snapshot row
+    carries no order book to reprice a stale bid against, so an unfilled
+    order past invest.luxury.PATIENCE_DAYS is flagged (went_stale) rather
+    than actually repriced; invest.luxury.build_picks does that live, at
+    collection time, against the real book.
+    """
+    bid, ask = row.get("buy_price"), row.get("sell_price")
+    pos["days"] += 1
+    if bid:
+        pos["last_bid"] = bid
+    if ask:
+        pos["last_ask"] = ask
+
+    if pos["filled"] < pos["qty"] - EPS and bid and bid <= pos["buy_at"]:
+        flow = _f(row.get("1d_buy_sold"))
+        pos["buy_front_days"] += 1
+        units = min(pos["qty"] - pos["filled"], CAPTURE * flow)
+        pos["filled"] += units
+        pos["spent"] += units * pos["buy_at"]
+        if pos["filled"] >= pos["qty"] - EPS and pos["filled_day"] is None:
+            pos["filled_day"] = pos["days"]
+    elif not pos["went_stale"]:
+        bucket, _ = luxury.patience_verdict(pos["days"], pos["filled"])
+        pos["went_stale"] = bucket == "reprice"
+
+    if pos["sold"] < pos["filled"] - EPS and ask and ask >= pos["sell_at"]:
+        flow = _f(row.get("1d_sell_sold"))
+        pos["sell_front_days"] += 1
+        units = min(pos["filled"] - pos["sold"], CAPTURE * flow)
+        pos["sold"] += units
+        pos["revenue"] += units * (pos["sell_at"] - 1) * (1 - TAX)
+        if pos["sold"] >= pos["qty"] - EPS and pos["sold_day"] is None:
+            pos["sold_day"] = pos["days"]
+
+
+TICKS = {"flip": tick_flip, "season": tick_season, "luxury": tick_luxury}
 
 
 # --- resolution ----------------------------------------------------------
 
 
 def is_done(pos, today):
-    """A flip resolves on a finished round trip or at its horizon; a hold
-    when its sell window has passed, or early once its entry is gone."""
+    """A flip or luxury pick resolves on a finished round trip or at its
+    horizon; a seasonal hold when its sell window has passed, or early once
+    its entry is gone."""
     iso = today.isoformat()
     age = _days(pos["opened"], today)
     if pos["kind"] == "flip":
         return pos["sold"] >= pos["qty"] - EPS or age >= FLIP_HORIZON_DAYS
+    if pos["kind"] == "luxury":
+        return pos["sold"] >= pos["qty"] - EPS or age >= LUXURY_HORIZON_DAYS
     if iso > pos["sell_closes"] or age >= SEASON_HORIZON_DAYS:
         return True
     return pos["filled"] <= EPS and iso > pos["buy_closes"]
@@ -320,13 +401,51 @@ def close_season(pos, today):
     }
 
 
-CLOSERS = {"flip": close_flip, "season": close_season}
+def close_luxury(pos, today):
+    """Book the position: same accounting as close_flip, this tier's own
+    horizon and a went_stale flag instead of a pred_rt_days comparison
+    (there is no single predicted trip length once patience repricing is
+    part of the plan)."""
+    held = max(0.0, pos["filled"] - pos["sold"])
+    mark = pos["last_bid"] or pos["buy_at"]
+    residual = held * mark * (1 - TAX)
+    net = pos["revenue"] + residual - pos["spent"]
+    pred_net = pos["margin"] * pos["qty"]
+    if pos["sold"] >= pos["qty"] - EPS:
+        outcome = "closed"
+    elif pos["filled"] > EPS:
+        outcome = "partial"
+    else:
+        outcome = "unfilled"
+    return {
+        "kind": "luxury",
+        "id": pos["id"],
+        "name": pos["name"],
+        "rarity": pos["rarity"],
+        "strategy": pos["strategy"],
+        "opened": pos["opened"],
+        "closed": today.isoformat(),
+        "outcome": outcome,
+        "qty": pos["qty"],
+        "filled": round(pos["filled"], 1),
+        "sold": round(pos["sold"], 1),
+        "days": pos["days"],
+        "buy_front_days": pos["buy_front_days"],
+        "sell_front_days": pos["sell_front_days"],
+        "went_stale": pos["went_stale"],
+        "pred_net": round(pred_net, 1),
+        "net": round(net, 1),
+        "net_pct": round(net / pred_net, 3) if pred_net > 0 else None,
+    }
+
+
+CLOSERS = {"flip": close_flip, "season": close_season, "luxury": close_luxury}
 
 
 # --- the daily roll ------------------------------------------------------
 
 
-def roll(state, picks, queue, by_id, today):
+def roll(state, picks, queue, by_id, today, luxury_picks=()):
     """One day of tracking: observe, resolve, then open today's picks.
 
     Positions are keyed by (kind, item): an item already being tracked is
@@ -366,6 +485,12 @@ def roll(state, picks, queue, by_id, today):
             live.append(pos)
             keys.add(("season", r["id"]))
             opened += 1
+    for p in luxury_picks[:LUXURY_PER_DAY]:
+        if ("luxury", p["id"]) in keys:
+            continue
+        live.append(open_luxury(p, today))
+        keys.add(("luxury", p["id"]))
+        opened += 1
 
     dropped = max(0, len(live) - OPEN_CAP)
     return (
@@ -385,15 +510,19 @@ def summarize(state):
     positions = state.get("positions") or []
     flips = [r for r in records if r["kind"] == "flip"]
     seasons = [r for r in records if r["kind"] == "season"]
+    luxuries = [r for r in records if r["kind"] == "luxury"]
     n = len(flips)
     completed = [r for r in flips if r["outcome"] == "closed"]
     scored = [r for r in seasons if r["outcome"] == "closed" and r["ret"] is not None]
     pred_net = sum(r["pred_net"] for r in flips)
+    lux_completed = [r for r in luxuries if r["outcome"] == "closed"]
+    lux_pred_net = sum(r["pred_net"] for r in luxuries)
     return {
         "since": state.get("since"),
         "open": {
             "flip": sum(1 for p in positions if p["kind"] == "flip"),
             "season": sum(1 for p in positions if p["kind"] == "season"),
+            "luxury": sum(1 for p in positions if p["kind"] == "luxury"),
         },
         "flip": {
             "n": n,
@@ -420,6 +549,23 @@ def summarize(state):
             "unfilled": sum(1 for r in seasons if r["outcome"] == "unfilled"),
             "med_ret": _med([r["ret"] for r in scored]),
             "med_pred_ret": _med([r["pred_ret"] for r in scored]),
+        },
+        "luxury": {
+            "n": len(luxuries),
+            "completed": len(lux_completed),
+            "partial": sum(1 for r in luxuries if r["outcome"] == "partial"),
+            "unfilled": sum(1 for r in luxuries if r["outcome"] == "unfilled"),
+            "never_front": sum(1 for r in luxuries if not r["buy_front_days"]),
+            "completed_pct": round(len(lux_completed) / len(luxuries), 3)
+            if luxuries
+            else None,
+            "pred_net": round(lux_pred_net),
+            "net": round(sum(r["net"] for r in luxuries)),
+            "net_pct": round(sum(r["net"] for r in luxuries) / lux_pred_net, 3)
+            if lux_pred_net > 0
+            else None,
+            "med_net_pct": _med([r["net_pct"] for r in luxuries]),
+            "went_stale": sum(1 for r in luxuries if r["went_stale"]),
         },
     }
 
@@ -576,13 +722,92 @@ def season_rows(records):
     return out
 
 
+def luxury_scoreboard_html(s):
+    l = s["luxury"]
+    if not l["n"]:
+        return (
+            "<p>No luxury desk pick has resolved yet. Picks resolve once the "
+            f"simulated round trip completes or after {LUXURY_HORIZON_DAYS} days, "
+            "whichever comes first.</p>"
+        )
+    rows = [
+        ("Resolved picks", f"{l['n']:,}"),
+        (
+            "Completed the round trip",
+            f"{l['completed']:,} ({pct(l['completed_pct'])})",
+        ),
+        ("Filled in part only", f"{l['partial']:,}"),
+        ("Never filled a unit", f"{l['unfilled']:,}"),
+        (
+            "Never reached the front of the book",
+            f"{l['never_front']:,} ({pct(l['never_front'] / l['n'])})",
+        ),
+        ("Net booked", f"{money(l['net'])} vs {money(l['pred_net'])} predicted"),
+        ("Realized share of predicted net", pct(l["net_pct"], 1)),
+        (
+            "Went stale past the patience window",
+            f"{l['went_stale']:,} ({pct(l['went_stale'] / l['n'])})",
+        ),
+    ]
+    body = "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in rows if v != "")
+    return f'<table class="score"><tbody>{body}</tbody></table>'
+
+
+def luxury_open_rows(positions):
+    out = []
+    for p in positions:
+        if p["kind"] != "luxury":
+            continue
+        out.append(
+            (
+                _item_link(p),
+                p["opened"],
+                f"{p['filled']:,.0f} / {p['qty']:,}",
+                f"{p['sold']:,.0f}",
+                money(p["buy_at"]),
+                money(p["sell_at"]),
+                money(p["last_bid"]) if p["last_bid"] else "",
+                money(p["last_ask"]) if p["last_ask"] else "",
+                f"{p['days']}d",
+                "stale" if p["went_stale"] else "",
+            )
+        )
+    return out[:TABLE_ROWS]
+
+
+def luxury_rows(records):
+    out = []
+    for r in reversed(records):
+        if r["kind"] != "luxury":
+            continue
+        out.append(
+            (
+                _item_link(r),
+                r["opened"],
+                f'<span class="o-{r["outcome"]}">{r["outcome"]}</span>',
+                f"{r['filled']:,.0f} / {r['qty']:,}",
+                f"{r['sold']:,.0f}",
+                f"{r['buy_front_days']} / {r['days']}",
+                money(r["net"]),
+                money(r["pred_net"]),
+                pct(r["net_pct"]),
+                "stale" if r["went_stale"] else "",
+            )
+        )
+        if len(out) >= TABLE_ROWS:
+            break
+    return out
+
+
 def render(state, summary, generated):
     o = summary["open"]
     html = TEMPLATE
     html = html.replace("__GENERATED__", generated)
     html = html.replace("__SINCE__", summary["since"] or generated[:10])
     html = html.replace(
-        "__OPEN__", f"{o['flip']} flip, {o['season']} seasonal positions open"
+        "__OPEN__",
+        f"{o['flip']} flip, {o['season']} seasonal, {o['luxury']} luxury desk "
+        "positions open",
     )
     html = html.replace("__SCORE__", scoreboard_html(summary))
     html = html.replace(
@@ -630,6 +855,31 @@ def render(state, summary, generated):
         "__SEASON_CLOSED__",
         f"<h3>Resolved holds</h3>{closed_holds}" if closed_holds else "",
     )
+    html = html.replace("__LUXURY_SCORE__", luxury_scoreboard_html(summary))
+    open_luxury_positions = _table(
+        [
+            "Item", "Opened", "Bought", "Sold", "Bid at", "Ask at",
+            "Bid now", "Ask now", "Age", "Patience",
+        ],
+        luxury_open_rows(state["positions"]),
+    )
+    html = html.replace(
+        "__LUXURY_OPEN__",
+        open_luxury_positions or "<p>No luxury desk position is open right now.</p>",
+    )
+    closed_luxury_positions = _table(
+        [
+            "Item", "Opened", "Outcome", "Bought", "Sold", "Front d",
+            "Net", "Predicted net", "Realized", "Patience",
+        ],
+        luxury_rows(state["records"]),
+    )
+    html = html.replace(
+        "__LUXURY_CLOSED__",
+        f"<h3>Resolved picks</h3>{closed_luxury_positions}"
+        if closed_luxury_positions
+        else "",
+    )
     return html
 
 
@@ -662,6 +912,13 @@ def main(store=None, snapshot=None, today=None):
     by_id = {it["id"]: it for it in snapshot if it.get("id") is not None}
     today = today or datetime.now(timezone.utc).date()
 
+    try:
+        luxury_artifact = store.get_json_gz(luxury.LUXURY_KEY) or {}
+    except Exception as e:  # luxury picks refine tracking, they don't gate it
+        print(f"luxury picks unavailable: {e}")
+        luxury_artifact = {}
+    luxury_picks = luxury_artifact.get("picks") or []
+
     state = {
         "since": None,
         "positions": [],
@@ -675,7 +932,7 @@ def main(store=None, snapshot=None, today=None):
     if prev_closed:
         state["records"] = prev_closed.get("records") or []
 
-    state, stats = roll(state, picks, queue, by_id, today)
+    state, stats = roll(state, picks, queue, by_id, today, luxury_picks=luxury_picks)
     summary = summarize(state)
 
     store.put_json_gz(
@@ -793,6 +1050,21 @@ listings on the days the ask sits under its pay-up-to ceiling, and is marked
 out over the prices observed inside its sell window. Cycles run for months,
 so most holds sit open; one that ages out before its window is marked at the
 last ask and labelled marked, not scored.</p>
+</div>
+<h2>Luxury desk</h2>
+__LUXURY_SCORE__
+<h3>Open positions</h3>
+__LUXURY_OPEN__
+__LUXURY_CLOSED__
+<div class="notes">
+<p>A luxury desk pick (docs/INVESTING.md strategy S4) is opened the day it
+publishes: a patient bid fills only on days the market's best bid comes down
+to our price, and the relist mirrors it against the best ask, at the same
+capture assumption as the flip table above but over a much longer horizon.
+Patience marks a position that has sat unfilled past the three-week rule
+that strategy states (invest.luxury.PATIENCE_DAYS); the daily snapshot
+carries no order book to actually reprice against mid-simulation, so this
+flags the rule firing rather than simulating the repriced fill.</p>
 </div>
 </body>
 </html>
