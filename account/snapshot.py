@@ -73,8 +73,14 @@ def value(held, prices):
     return floor, mark
 
 
-def take(acct=None):
-    acct = acct or gw2account.Account()
+def gather(acct):
+    """Everything the account holds, before any valuation.
+
+    Scope-checked; stock includes the delivery box and units sitting in open
+    sell listings, and the gold side includes coin escrowed in open buy
+    orders. invest.nav consumes this too, so the NAV series and the manual
+    snapshot value the same holdings.
+    """
     scopes = set(acct.token_info().get("permissions", []))
     need = {"account", "wallet", "inventories", "characters", "tradingpost"}
     missing = need - scopes
@@ -85,7 +91,6 @@ def take(acct=None):
             f"{', '.join(sorted(need))}"
         )
 
-    coins = acct.coins()
     delivery = acct.delivery()
     held = held_items(acct)
     for it in delivery.get("items", []):
@@ -93,22 +98,34 @@ def take(acct=None):
 
     open_buys = acct.current_orders("buys")
     open_sells = acct.current_orders("sells")
-    buy_capital = sum(o["price"] * o["quantity"] for o in open_buys)
     for o in open_sells:
         held[o["item_id"]] = held.get(o["item_id"], 0) + o["quantity"]
 
+    return {
+        "coins": acct.coins(),
+        "delivery_coins": delivery.get("coins", 0),
+        "open_buy_capital": sum(o["price"] * o["quantity"] for o in open_buys),
+        "open_buy_orders": len(open_buys),
+        "open_sell_orders": len(open_sells),
+        "held": held,
+    }
+
+
+def take(acct=None):
+    acct = acct or gw2account.Account()
+    g = gather(acct)
     prices = gw2api.fetch_all_prices()
-    floor, mark = value(held, prices)
-    liquid = coins + delivery.get("coins", 0) + buy_capital
+    floor, mark = value(g["held"], prices)
+    liquid = g["coins"] + g["delivery_coins"] + g["open_buy_capital"]
 
     return {
         "taken_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "coins": coins,
-        "delivery_coins": delivery.get("coins", 0),
-        "open_buy_capital": buy_capital,
-        "open_buy_orders": len(open_buys),
-        "open_sell_orders": len(open_sells),
-        "distinct_items": len(held),
+        "coins": g["coins"],
+        "delivery_coins": g["delivery_coins"],
+        "open_buy_capital": g["open_buy_capital"],
+        "open_buy_orders": g["open_buy_orders"],
+        "open_sell_orders": g["open_sell_orders"],
+        "distinct_items": len(g["held"]),
         "stock_floor": floor,
         "stock_mark": mark,
         "total_floor": liquid + floor,

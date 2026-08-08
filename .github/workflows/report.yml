@@ -35,6 +35,12 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
+      # One NAV point per day; without a GW2_API_KEY secret it skips cleanly.
+      - run: python -m invest.nav
+        continue-on-error: true
+        env:
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
+          GW2_API_KEY: ${{ secrets.GW2_API_KEY }}
       - run: python -m report.build
         env:
           S3_BUCKET: ${{ vars.S3_BUCKET }}
@@ -50,6 +56,12 @@ jobs:
         continue-on-error: true
         env:
           S3_BUCKET: ${{ vars.S3_BUCKET }}
+      # Benchmarks page from the weekly index and the NAV series.
+      - run: python -m report.invest
+        continue-on-error: true
+        env:
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
+          BANKROLL_G: ${{ vars.BANKROLL_G }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site

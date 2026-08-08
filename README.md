@@ -15,6 +15,7 @@ Near-zero-budget design: data collection runs on GitHub Actions cron, price hist
 - `season/` seasonal decomposition, event calendar, cycle returns
 - `report/` daily HTML/CLI report
 - `account/` your own trading results, needs an API key
+- `invest/` long-horizon layer: market index, NAV series, class tags, bankroll caps
 - `archive/` preserved third-party data, see its README for provenance
 
 ## Checking your own trading
@@ -68,9 +69,20 @@ Every build's picks are also opened as paper positions (`report/track.py`) and r
 
 Seasonal queue transitions (a pick becomes a buy, opens soon, hits its sell window, or stops being a buy) are posted as comments on [issue #20](https://github.com/PetrCala/gw2-advisor/issues/20); subscribe to that issue for free email/push notifications. The same events publish as an RSS feed at [feed.xml](https://petrcala.github.io/gw2-advisor/feed.xml).
 
+## Benchmarks and NAV
+
+"Ahead of the market" needs a market, so [invest.html](https://petrcala.github.io/gw2-advisor/invest.html) charts one: a turnover-weighted index over the trailing top 500 items (rebalanced monthly, single item capped at 5%, daily levels since mid-2019, rebuilt weekly by invest.yml), next to raw gold, ectos, and the gem rate. The design behind it is [docs/INVESTING.md](docs/INVESTING.md).
+
+Two optional repository settings light up the rest:
+
+- a `GW2_API_KEY` secret (scopes: account, wallet, inventories, characters, tradingpost) makes the daily report append one NAV point per day: the whole account valued at a dump into the current bids, net of fees, broken down by material class
+- a `BANKROLL_G` variable (investable gold, whole number) sizes the per-strategy allocation caps and the exposure shares against it
+
+Absolute gold never reaches the public page: the NAV line is rebased to 100 where it enters and everything else is a percentage. The raw series stays in the private bucket.
+
 ## Status
 
-M4 (seasonality + event calendar). See [docs/ROADMAP.md](docs/ROADMAP.md) and the issue tracker.
+M6 (long-horizon investment book), foundations first. See [docs/ROADMAP.md](docs/ROADMAP.md) and the issue tracker.
 
 ## Compliance
 
