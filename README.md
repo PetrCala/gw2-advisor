@@ -80,9 +80,11 @@ Two optional repository settings light up the rest:
 
 Absolute gold never reaches the public page: the NAV line is rebased to 100 where it enters and everything else is a percentage. The raw series stays in the private bucket.
 
+The same page lists the luxury desk: daily buy/relist recommendations for the 500g+ tier (strategy S4 in [docs/INVESTING.md](docs/INVESTING.md)), gap-walked from a dedicated order-book collection and sized by exit liquidity. Each pick opens as a paper position in the [track record](https://petrcala.github.io/gw2-advisor/track.html) under the "luxury desk" tag.
+
 ## Status
 
-M6 (long-horizon investment book), foundations first. See [docs/ROADMAP.md](docs/ROADMAP.md) and the issue tracker.
+M6 (long-horizon investment book): foundations plus the luxury desk (M6.c). See [docs/ROADMAP.md](docs/ROADMAP.md) and the issue tracker.
 
 ## Compliance
 

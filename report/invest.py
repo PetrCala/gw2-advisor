@@ -4,15 +4,22 @@ Usage:
     python -m report.invest             # reads the invest/ artifacts from S3
     python -m report.invest --local     # renders the empty-state page, no AWS
 
-Reads the weekly index artifact (invest/bench.json.gz) and the daily NAV
-series (invest/nav.json.gz) and renders the "are we ahead of the market"
-page: benchmark lines (index, raw gold, ecto, gem rate), the NAV line, the
-allocation caps, and the holdings class breakdown.
+Reads the weekly index artifact (invest/bench.json.gz), the daily NAV series
+(invest/nav.json.gz), the daily craft-carry series (invest/craft.json.gz)
+and the daily luxury desk artifact (invest/luxury/latest.json.gz), and
+renders the "are we ahead of the market" page: benchmark lines (index, raw
+gold, ecto, gem rate), the NAV line, the allocation caps, the holdings class
+breakdown, time-gated craft carry, and today's luxury desk picks
+(docs/INVESTING.md strategies S8 and S4).
 
 Privacy rule: the NAV series is stored in the private bucket in absolute
 gold, but everything published here is rebased to 100 or expressed as a
 percentage, so the public page never carries absolute wealth. The bankroll
-(BANKROLL_G) is used only as a denominator for the same reason.
+(BANKROLL_G) is used only as a denominator for the same reason. The craft
+carry and luxury desk tables are an exception by design, the same way the
+flip report shows prices: cost/sell/capital there are market data and a
+recommendation, not the user's own holdings, so showing them in gold is not
+a wealth leak.
 """
 
 import json
@@ -26,6 +33,7 @@ from account.pnl import gold
 from invest import bankroll, tags
 from invest.craft import CRAFT_KEY
 from invest.index import BENCH_KEY, trailing_return
+from invest.luxury import LUXURY_KEY
 from invest.nav import NAV_KEY
 
 SITE = Path(__file__).resolve().parent.parent / "site"
@@ -142,7 +150,19 @@ def craft_rows(series, window=CRAFT_EVIDENCE_DAYS):
     return rows
 
 
-def build_payload(bench, nav, bankroll_copper, craft_series=None):
+def luxury_public(doc):
+    """The publishable slice of the luxury desk artifact, or None without one."""
+    if not doc or not doc.get("picks"):
+        return None
+    return {
+        "generated": doc.get("generated"),
+        "through": doc.get("through"),
+        "universe_n": doc.get("universe_n"),
+        "picks": doc.get("picks"),
+    }
+
+
+def build_payload(bench, nav, bankroll_copper, craft_series=None, luxury_doc=None):
     nav_pub = nav_public(nav)
     return {
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -165,6 +185,7 @@ def build_payload(bench, nav, bankroll_copper, craft_series=None):
         "bankroll_set": bool(bankroll_copper),
         "exposure": exposure_rows(nav, bankroll_copper),
         "craft": craft_rows(craft_series),
+        "luxury": luxury_public(luxury_doc),
     }
 
 
@@ -312,6 +333,36 @@ def craft_table(payload):
     )
 
 
+def luxury_table(payload):
+    lux = payload.get("luxury")
+    if not lux:
+        return (
+            "<p>No luxury desk artifact yet; the daily invest.luxury step "
+            "fills this in once it has collected an order book.</p>"
+        )
+    rows = lux.get("picks") or []
+    cells = "".join(
+        "<tr><td><a href=\"https://www.gw2bltc.com/en/item/{}\">{}</a></td>"
+        "<td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>"
+        "<td>{}</td><td>{}</td></tr>".format(
+            p["id"], escape(p["name"]), gold(p["buy_at"]), gold(p["sell_at"]),
+            share(p["margin_pct"]), p["qty"], gold(p["capital"]),
+            f"{p['entry_flow_week']:g}/wk", f"{p['exit_flow_week']:g}/wk",
+        )
+        for p in rows
+    )
+    meta = (
+        f"{lux.get('universe_n', 0):,} items in the tracked universe, "
+        f"{len(rows)} priced with a placeable margin, as of {lux.get('through', '?')}"
+    )
+    return (
+        f"<p>{meta}</p>"
+        "<table><thead><tr><th>Item</th><th>Bid at</th><th>Ask at</th>"
+        "<th>Margin</th><th>Qty</th><th>Capital</th><th>Entry flow</th>"
+        f"<th>Exit flow</th></tr></thead><tbody>{cells}</tbody></table>"
+    )
+
+
 def render(payload):
     bench = payload.get("bench")
     if bench and bench.get("index"):
@@ -331,6 +382,7 @@ def render(payload):
     html = html.replace("__EXPOSURE__", exposure_table(payload))
     html = html.replace("__CONSTITUENTS__", constituents_table(payload))
     html = html.replace("__CRAFT__", craft_table(payload))
+    html = html.replace("__LUXURY__", luxury_table(payload))
     # </ would end the script block early if an item name ever carried it
     html = html.replace("__DATA__", json.dumps(payload).replace("</", "<\\/"))
     return html
@@ -338,7 +390,7 @@ def render(payload):
 
 def main():
     local = "--local" in sys.argv
-    bench = nav = craft_series = None
+    bench = nav = craft_series = luxury_doc = None
     if not local:
         from collector.s3store import Store
 
@@ -346,15 +398,19 @@ def main():
         bench = store.get_json_gz(BENCH_KEY)
         nav = store.get_json_gz(NAV_KEY)
         craft_series = store.get_json_gz(CRAFT_KEY)
+        luxury_doc = store.get_json_gz(LUXURY_KEY)
 
-    payload = build_payload(bench, nav, bankroll.bankroll_copper(), craft_series)
+    payload = build_payload(
+        bench, nav, bankroll.bankroll_copper(), craft_series, luxury_doc
+    )
     SITE.mkdir(exist_ok=True)
     (SITE / "invest.json").write_text(json.dumps(payload, indent=1), encoding="utf-8")
     (SITE / "invest.html").write_text(render(payload), encoding="utf-8")
     print(
         f"benchmarks page (index: {'yes' if bench else 'no'}, "
         f"nav points: {len((nav or {}).get('points') or [])}, "
-        f"craft points: {len((craft_series or {}).get('points') or [])}) "
+        f"craft points: {len((craft_series or {}).get('points') or [])}, "
+        f"luxury picks: {len((luxury_doc or {}).get('picks') or [])}) "
         f"-> {SITE / 'invest.html'}"
     )
 
@@ -429,6 +485,15 @@ the fifth, Charged Quartz Crystal, has no single tradable next step and is
 tracked for its input cost only. A carry is marked dead once its spread
 drops under the 15% tax itself, not just below zero.</p>
 __CRAFT__
+<h2>Luxury desk</h2>
+<p>Strategy S4: the 500g+ tier trades at wide spreads on 1-5 sales a week,
+too thin for the flip crowd to size. Bid at, sell at are today's patient
+placements, gap-walked into the live book the same way the flip table's
+prices are; qty is capped by this item's own exit flow over a 30-day
+horizon and by a few units per item so the book stays spread across names.
+Picks open as paper positions on <a href="track.html">the track record
+page</a> under the luxury desk strategy tag.</p>
+__LUXURY__
 __CONSTITUENTS__
 <div class="notes">
 <ul>
@@ -448,6 +513,14 @@ above the best bid, sell 1 below the best ask), the same queue-front
 convention as the daily flip table, revenue net of the 15% cut. Live days
 counts trailing days the spread cleared the tax hurdle, out of days it
 priced at all.</li>
+<li>Luxury desk universe: items priced 500g or more with at least one sale
+in the trailing week, minus a small curated exclusion list (generation-1
+precursors, policy-broken since 2023). Entry/exit flow blends the 7-day
+and 1-month rolling fill counts so one heavy or dead day cannot swing an
+estimate this thin; margin is net of the 15% cut and only clears the desk
+at 10% or better. An order that sits unfilled past three weeks is
+repriced or withdrawn by rule, not judgment; the paper track record flags
+this as a stale position rather than a missed sale.</li>
 </ul>
 </div>
 <script>

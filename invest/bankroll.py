@@ -6,8 +6,8 @@ set locally in .env and in CI as a repository Actions variable. Unset means
 the caps render as percentages only.
 
 Caps are the design's allocation limits per strategy rung, binding at entry
-time once strategies emit positions (M6.b+). Flips are absent on purpose:
-their capital is self-limiting by construction.
+time once strategies emit positions (M6.b onward). Flips are absent on
+purpose: their capital is self-limiting by construction.
 """
 
 import os
