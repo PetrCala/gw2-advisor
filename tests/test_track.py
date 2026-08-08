@@ -34,6 +34,16 @@ def _queue_row(**over):
     return r
 
 
+def _luxury_pick(**over):
+    p = {
+        "id": 501, "name": "Luxury Item", "rarity": "Ascended",
+        "strategy": "luxury desk", "buy_at": 5_000_000, "sell_at": 8_000_000,
+        "qty": 3, "margin": 1_800_000,
+    }
+    p.update(over)
+    return p
+
+
 class FakeStore:
     """collector.s3store.Store's read/write surface, in memory."""
 
@@ -169,6 +179,82 @@ def test_a_queue_row_without_a_limit_or_a_size_is_not_tracked():
     assert track.open_season(_queue_row(sell_closes=None), D0) is None
 
 
+# --- luxury desk simulation ------------------------------------------------
+
+
+def _luxury_row(**over):
+    # 1d_buy_sold/sell_sold of 12 exactly fills the default pick's qty=3 in
+    # one tick (CAPTURE 0.25 x 12 == 3), the same tuning _row() uses for flip.
+    r = {
+        "id": 501, "buy_price": 5_000_000, "sell_price": 8_000_000,
+        "1d_buy_sold": 12, "1d_sell_sold": 12,
+    }
+    r.update(over)
+    return r
+
+
+def test_a_luxury_pick_that_fills_and_sells_books_the_predicted_margin():
+    pos = track.open_luxury(_luxury_pick(), D0)
+    track.tick_luxury(pos, _luxury_row(), D0)
+    assert pos["filled"] == 3 and pos["sold"] == 3
+    rec = track.close_luxury(pos, D0)
+    assert rec["kind"] == "luxury"
+    assert rec["strategy"] == "luxury desk"
+    assert rec["outcome"] == "closed"
+    assert rec["pred_net"] == 5_400_000  # 3 units at the 1.8m margin
+    assert rec["went_stale"] is False
+
+
+def test_a_luxury_bid_the_market_never_reaches_goes_stale_after_patience_runs_out():
+    from invest import luxury as invest_luxury
+
+    pos = track.open_luxury(_luxury_pick(), D0)
+    for n in range(invest_luxury.PATIENCE_DAYS + 1):
+        track.tick_luxury(pos, _luxury_row(buy_price=6_000_000), _day(n))
+    assert pos["filled"] == 0
+    assert pos["went_stale"] is True
+    rec = track.close_luxury(pos, _day(invest_luxury.PATIENCE_DAYS + 1))
+    assert rec["outcome"] == "unfilled"
+    assert rec["went_stale"] is True
+
+
+def test_a_luxury_pick_short_of_patience_does_not_go_stale_yet():
+    from invest import luxury as invest_luxury
+
+    pos = track.open_luxury(_luxury_pick(), D0)
+    track.tick_luxury(pos, _luxury_row(buy_price=6_000_000), D0)
+    assert pos["days"] < invest_luxury.PATIENCE_DAYS
+    assert pos["went_stale"] is False
+
+
+def test_a_partial_luxury_fill_does_not_go_stale_even_past_the_window():
+    from invest import luxury as invest_luxury
+
+    pos = track.open_luxury(_luxury_pick(qty=2), D0)
+    track.tick_luxury(pos, _luxury_row(), D0)  # the default flow fills the whole lot
+    assert pos["filled"] == 2
+    for n in range(1, invest_luxury.PATIENCE_DAYS + 2):
+        track.tick_luxury(pos, _luxury_row(sell_price=6_000_000), _day(n))
+    assert pos["went_stale"] is False  # already filled: nothing left to reprice
+
+
+def test_unsold_luxury_units_are_marked_at_the_last_bid_net_of_fees():
+    pos = track.open_luxury(_luxury_pick(), D0)
+    # bought in full (default flow), undercut on the way out
+    track.tick_luxury(pos, _luxury_row(sell_price=5_500_000), D0)
+    assert pos["filled"] == 3 and pos["sold"] == 0
+    rec = track.close_luxury(pos, _day(1))
+    assert rec["outcome"] == "partial"
+    assert rec["net"] == round(3 * 5_000_000 * 0.85 - 3 * 5_000_000, 1)
+    assert rec["net_pct"] < 0
+
+
+def test_a_luxury_position_resolves_at_its_own_horizon():
+    pos = track.open_luxury(_luxury_pick(), D0)
+    assert not track.is_done(pos, _day(track.LUXURY_HORIZON_DAYS - 1))
+    assert track.is_done(pos, _day(track.LUXURY_HORIZON_DAYS))
+
+
 # --- the daily roll ------------------------------------------------------
 
 
@@ -246,6 +332,34 @@ def test_only_buy_now_queue_rows_are_tracked():
     assert [p["id"] for p in state["positions"]] == [8]
 
 
+def test_roll_opens_luxury_picks_when_given_some():
+    state, stats = track.roll(
+        _empty(), [], [], {}, D0, luxury_picks=[_luxury_pick()]
+    )
+    assert stats["opened"] == 1
+    assert [p["kind"] for p in state["positions"]] == ["luxury"]
+
+
+def test_roll_without_luxury_picks_opens_nothing_new_for_that_kind():
+    state, stats = track.roll(_empty(), [_pick()], [_queue_row()], {}, D0)
+    assert "luxury" not in {p["kind"] for p in state["positions"]}
+
+
+def test_a_luxury_pick_already_tracked_is_not_opened_twice():
+    state, _ = track.roll(_empty(), [], [], {}, D0, luxury_picks=[_luxury_pick()])
+    state, stats = track.roll(
+        state, [], [], {}, _day(1), luxury_picks=[_luxury_pick()]
+    )
+    assert stats["opened"] == 0
+    assert len(state["positions"]) == 1
+
+
+def test_luxury_opens_per_day_are_capped():
+    picks = [_luxury_pick(id=i, name=f"Luxury {i}") for i in range(track.LUXURY_PER_DAY + 3)]
+    state, stats = track.roll(_empty(), [], [], {}, D0, luxury_picks=picks)
+    assert stats["opened"] == track.LUXURY_PER_DAY
+
+
 # --- summary and page ----------------------------------------------------
 
 
@@ -268,23 +382,55 @@ def test_summary_counts_outcomes_and_compares_against_the_assumption():
     assert s["flip"]["net"] == 692
     assert s["flip"]["med_capture_needed"] == 0.25
     assert s["flip"]["capture_assumed"] == track.CAPTURE
-    assert s["open"] == {"flip": 0, "season": 0}
+    assert s["open"] == {"flip": 0, "season": 0, "luxury": 0}
 
 
 def test_summary_of_an_empty_record_is_all_zeroes():
     s = track.summarize(_empty())
     assert s["flip"]["n"] == 0 and s["flip"]["net_pct"] is None
     assert s["season"]["med_ret"] is None
+    assert s["luxury"]["n"] == 0 and s["luxury"]["net_pct"] is None
+    assert s["open"]["luxury"] == 0
+
+
+def _resolved_luxury_state():
+    """One pick that round-tripped same-day, one the market never reached."""
+    dud = {2: _luxury_row(buy_price=6_000_000)}
+    picks = [_luxury_pick(), _luxury_pick(id=2, name="Dud")]
+    state, _ = track.roll(_empty(), [], [], {}, D0, luxury_picks=picks)
+    fast = {501: _luxury_row(), **dud}  # default flow fully fills and sells in one tick
+    state, _ = track.roll(state, [], [], fast, _day(1))
+    state, _ = track.roll(state, [], [], dud, _day(track.LUXURY_HORIZON_DAYS))
+    return state
+
+
+def test_summary_counts_luxury_outcomes():
+    s = track.summarize(_resolved_luxury_state())
+    assert s["luxury"]["n"] == 2
+    assert s["luxury"]["completed"] == 1 and s["luxury"]["unfilled"] == 1
+    assert s["luxury"]["net"] > 0
+    assert s["luxury"]["pred_net"] == 2 * 3 * 1_800_000  # both picks promised the same margin
+
+
+def test_summarize_counts_went_stale_records():
+    pos = track.open_luxury(_luxury_pick(), D0)
+    pos["went_stale"] = True
+    state = _empty()
+    state["records"] = [track.close_luxury(pos, _day(track.LUXURY_HORIZON_DAYS))]
+    s = track.summarize(state)
+    assert s["luxury"]["went_stale"] == 1
 
 
 def test_the_page_renders_every_placeholder():
     state = _resolved_state()
     state["positions"].append(track.open_season(_queue_row(), D0))
+    state["positions"].append(track.open_luxury(_luxury_pick(), D0))
     html = track.render(state, track.summarize(state), "2026-08-08 04:20 UTC")
     for placeholder in ("GENERATED", "SINCE", "OPEN", "SCORE", "FLIPS",
-                        "SEASON_META", "SEASON_OPEN", "SEASON_CLOSED"):
+                        "SEASON_META", "SEASON_OPEN", "SEASON_CLOSED",
+                        "LUXURY_SCORE", "LUXURY_OPEN", "LUXURY_CLOSED"):
         assert f"__{placeholder}__" not in html
-    assert "Test Item" in html and "Season Item" in html
+    assert "Test Item" in html and "Season Item" in html and "Luxury Item" in html
     assert "Capture needed" in html
     assert "2026-08-08 04:20 UTC" in html
 
@@ -330,6 +476,25 @@ def test_main_writes_the_state_and_the_page(tmp_path, monkeypatch):
     doc = json.loads((site / "track.json").read_text(encoding="utf-8"))
     assert doc["summary"]["flip"]["n"] == 0
     assert len(doc["open"]) == 2
+
+
+def test_main_opens_luxury_positions_from_the_s3_artifact(tmp_path, monkeypatch):
+    from invest import luxury as invest_luxury
+
+    _site(tmp_path, monkeypatch)
+    store = FakeStore({invest_luxury.LUXURY_KEY: {"picks": [_luxury_pick()]}})
+    track.main(store=store, snapshot=[_row()], today=D0)
+
+    positions = store.objects[track.OPEN_KEY]["positions"]
+    assert "luxury" in {p["kind"] for p in positions}
+
+
+def test_main_tolerates_no_luxury_artifact_yet(tmp_path, monkeypatch):
+    _site(tmp_path, monkeypatch)
+    store = FakeStore()  # no invest/luxury/latest.json.gz key at all
+    track.main(store=store, snapshot=[_row()], today=D0)
+    positions = store.objects[track.OPEN_KEY]["positions"]
+    assert "luxury" not in {p["kind"] for p in positions}
 
 
 def test_main_scores_the_next_day_against_the_stored_state(tmp_path, monkeypatch):
