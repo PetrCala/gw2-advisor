@@ -24,6 +24,7 @@ imports stay inside functions so the module imports with stdlib only.
 import io
 import json
 import os
+from array import array
 from datetime import date, datetime, timedelta, timezone
 
 from season.cycles import daily_price
@@ -158,7 +159,8 @@ def chain_daily(days, mids, turn, cover, base=BASE_LEVEL, min_eligible=None,
                     continue
                 a, b = seq[t - 1], seq[t]
                 if _ok(a) and _ok(b):
-                    # float() keeps numpy scalars out of the level, and out
+                    # float() keeps exotic scalar types from whatever
+                    # sequence the caller passed out of the level, and out
                     # of the artifact json
                     num += w * min(hi, max(lo, float(b) / float(a)))
                     wsum += w
@@ -183,14 +185,15 @@ def load(store):
     """Stream all history chunks into index inputs.
 
     Returns (days, mids, turn, cover, ecto, through): the ISO day axis from
-    AXIS_START to the last observed day, dense per-item daily mid arrays,
-    per-item monthly turnover and price-day counts, the full ecto daily
-    series (pre-2019 included), and the last observed date.
+    AXIS_START to the last observed day, dense per-item daily mid arrays
+    (stdlib array of doubles, NaN gaps; the collector requirements carry no
+    numpy), per-item monthly turnover and price-day counts, the full ecto
+    daily series (pre-2019 included), and the last observed date.
     """
-    import numpy as np
     import pyarrow.parquet as pq
 
     n_days = (date.today() - AXIS_START).days + 1
+    empty = array("d", [float("nan")]) * n_days
     mids, turn, cover = {}, {}, {}
     ecto = {}
     last_idx = -1
@@ -225,9 +228,7 @@ def load(store):
                 continue
             entry = pending.get(item_id)
             if entry is None:
-                entry = pending[item_id] = (
-                    np.full(n_days, np.nan, dtype=np.float32), {}, {},
-                )
+                entry = pending[item_id] = (array("d", empty), {}, {})
             arr, mturn, mcover = entry
             arr[idx] = (sp + bp) / 2 if bp and bp > 0 else sp
             m = d.year * 12 + d.month - 1
