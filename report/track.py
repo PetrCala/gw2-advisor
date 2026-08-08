@@ -16,6 +16,16 @@ The simulation, stated plainly:
 - A seasonal pick buys off listings on the days the ask sits under its
   pay-up-to ceiling, and is marked out over the prices observed inside its
   sell window.
+- A craft-carry pick (docs/INVESTING.md, S8) crafts once a day at that day's
+  own cost and revenue for as long as the refinement keeps pricing, and
+  resolves after CRAFT_HORIZON_DAYS: no queue to reach, since the inputs are
+  bulk staples bought and the output sold at one order-width inside the
+  book, the same convention invest.craft prices them with.
+
+Every opened position carries a "strategy" tag (docs/INVESTING.md,
+benchmarks: "every recommendation the long book emits ... with the strategy
+tag carried through"), so a future scoreboard can group hit rate and
+realized return by strategy rather than just by kind.
 
 What that measures, and what it cannot. Fills are simulated, so this is not
 a measurement of our own share of the flow: nothing short of trading real
@@ -38,8 +48,9 @@ to the notify state and under the same never-gate-the-deploy rule.
 Usage:
     python -m report.track    # needs S3_BUCKET; runs after report.build
 
-It reads the freshly built site/data.json and site/actions.json and costs one
-extra datawars2 snapshot request a day, the same one the build makes.
+It reads the freshly built site/data.json and site/actions.json, the same-run
+invest/craft.json.gz point, and costs one extra datawars2 snapshot request a
+day, the same one the build makes.
 """
 
 import json
@@ -50,6 +61,7 @@ from html import escape
 from pathlib import Path
 from statistics import median
 
+from invest.craft import CRAFT_KEY
 from scorers import flip
 
 SITE = Path(__file__).resolve().parent.parent / "site"
@@ -62,11 +74,14 @@ CAPTURE = flip.CAPTURE  # the assumption under test, read from the scorer itself
 
 FLIP_HORIZON_DAYS = 7  # a 2-day predicted round trip gets a week to happen
 SEASON_HORIZON_DAYS = 400  # one full cycle plus slack, then mark it out
+CRAFT_HORIZON_DAYS = 7  # matches S8's "sell weekly" cadence
 FLIP_PER_DAY = flip.TOP_N  # the picks as published, no wider
 OPEN_CAP = 800  # backstop on state size; the horizons bound it well below this
 CLOSED_CAP = 400
 TABLE_ROWS = 40  # rows rendered per table; the json carries everything
 EPS = 1e-9
+
+STRATEGY = {"flip": "flip", "season": "festival carry", "craft": "time-gated crafting"}
 
 # Open positions carry running aggregates, so a field added later would make
 # the stored ones unreadable. They are stamped instead, and a stamp we no
@@ -97,6 +112,7 @@ def open_flip(pick, today):
     return {
         "v": SCHEMA,
         "kind": "flip",
+        "strategy": STRATEGY["flip"],
         "id": pick["id"],
         "name": pick.get("name") or f"item {pick['id']}",
         "rarity": pick.get("rarity") or "",
@@ -134,6 +150,7 @@ def open_season(row, today):
     return {
         "v": SCHEMA,
         "kind": "season",
+        "strategy": STRATEGY["season"],
         "id": row["id"],
         "name": row.get("name") or f"item {row['id']}",
         "event": row.get("event") or "",
@@ -153,6 +170,29 @@ def open_season(row, today):
         "window_sum": 0.0,
         "last_bid": None,
         "last_ask": None,
+        "last_tick": None,
+    }
+
+
+def open_craft(chain, today):
+    """A live craft-carry reading as a paper position; id is the chain's
+    key (a string), not a GW2 item id, since one refinement has no single
+    item to key on. output_id carries the tradable item for display links.
+    """
+    return {
+        "v": SCHEMA,
+        "kind": "craft",
+        "strategy": STRATEGY["craft"],
+        "id": chain["key"],
+        "name": chain["name"],
+        "output_id": chain["output_id"],
+        "opened": today.isoformat(),
+        "pred_spread": chain["spread"],
+        "days": 0,
+        "crafted": 0,
+        "spent": 0.0,
+        "revenue": 0.0,
+        "last_spread": chain["spread"],
         "last_tick": None,
     }
 
@@ -217,7 +257,25 @@ def tick_season(pos, row, today):
         pos["window_sum"] += ask
 
 
-TICKS = {"flip": tick_flip, "season": tick_season}
+def tick_craft(pos, chain_today, today):
+    """Advance one craft-carry position by a day of fresh chain pricing.
+
+    Crafts once at that day's own cost and revenue when the chain still
+    prices a spread; a day it stops pricing (a stale market, or the fifth
+    refinement's missing output) is simply not crafted, so a position can
+    resolve having crafted fewer than `days` times.
+    """
+    pos["days"] += 1
+    cost = chain_today.get("cost") if chain_today else None
+    revenue = chain_today.get("revenue") if chain_today else None
+    if cost is not None and revenue is not None:
+        pos["crafted"] += 1
+        pos["spent"] += cost
+        pos["revenue"] += revenue
+        pos["last_spread"] = chain_today["spread"]
+
+
+TICKS = {"flip": tick_flip, "season": tick_season, "craft": tick_craft}
 
 
 # --- resolution ----------------------------------------------------------
@@ -225,11 +283,15 @@ TICKS = {"flip": tick_flip, "season": tick_season}
 
 def is_done(pos, today):
     """A flip resolves on a finished round trip or at its horizon; a hold
-    when its sell window has passed, or early once its entry is gone."""
+    when its sell window has passed, or early once its entry is gone; a
+    craft carry weekly, on a fixed horizon (docs/INVESTING.md's "sell
+    weekly" cadence)."""
     iso = today.isoformat()
     age = _days(pos["opened"], today)
     if pos["kind"] == "flip":
         return pos["sold"] >= pos["qty"] - EPS or age >= FLIP_HORIZON_DAYS
+    if pos["kind"] == "craft":
+        return age >= CRAFT_HORIZON_DAYS
     if iso > pos["sell_closes"] or age >= SEASON_HORIZON_DAYS:
         return True
     return pos["filled"] <= EPS and iso > pos["buy_closes"]
@@ -255,6 +317,7 @@ def close_flip(pos, today):
         outcome = "unfilled"
     return {
         "kind": "flip",
+        "strategy": pos.get("strategy", STRATEGY["flip"]),
         "id": pos["id"],
         "name": pos["name"],
         "rarity": pos["rarity"],
@@ -302,6 +365,7 @@ def close_season(pos, today):
         ret = round((exit_price * (1 - TAX) - avg_cost) / avg_cost, 3)
     return {
         "kind": "season",
+        "strategy": pos.get("strategy", STRATEGY["season"]),
         "id": pos["id"],
         "name": pos["name"],
         "event": pos["event"],
@@ -320,27 +384,60 @@ def close_season(pos, today):
     }
 
 
-CLOSERS = {"flip": close_flip, "season": close_season}
+def close_craft(pos, today):
+    """Book the week: net crafted revenue against what was spent crafting it.
+
+    outcome is "closed" once at least one day actually crafted (the chain
+    priced a spread that day), "unfilled" when the refinement never priced
+    all week, matching the flip/season vocabulary of a position that never
+    got a chance to prove anything.
+    """
+    net = pos["revenue"] - pos["spent"]
+    outcome = "closed" if pos["crafted"] else "unfilled"
+    return {
+        "kind": "craft",
+        "strategy": pos.get("strategy", STRATEGY["craft"]),
+        "id": pos["id"],
+        "name": pos["name"],
+        "output_id": pos["output_id"],
+        "opened": pos["opened"],
+        "closed": today.isoformat(),
+        "outcome": outcome,
+        "days": pos["days"],
+        "crafted": pos["crafted"],
+        "spent": round(pos["spent"], 1),
+        "revenue": round(pos["revenue"], 1),
+        "net": round(net, 1),
+        "net_pct": round(net / pos["spent"], 3) if pos["spent"] > 0 else None,
+        "pred_spread": pos["pred_spread"],
+    }
+
+
+CLOSERS = {"flip": close_flip, "season": close_season, "craft": close_craft}
 
 
 # --- the daily roll ------------------------------------------------------
 
 
-def roll(state, picks, queue, by_id, today):
+def roll(state, picks, queue, by_id, today, crafts=()):
     """One day of tracking: observe, resolve, then open today's picks.
 
     Positions are keyed by (kind, item): an item already being tracked is
     not opened again until its position resolves, so the record is a set of
     independent samples rather than the same pick counted seven times.
+    crafts is invest.craft's latest per-chain readings (spread_of's dicts);
+    craft positions key on the chain's string key rather than a GW2 item id,
+    so they get their own lookup instead of sharing by_id.
     """
     iso = today.isoformat()
     positions = [p for p in (state.get("positions") or []) if p.get("v") == SCHEMA]
     records = list(state.get("records") or [])
     since = state.get("since") or iso
+    by_craft = {c["key"]: c for c in crafts}
 
     live, closed_now = [], []
     for pos in positions:
-        row = by_id.get(pos["id"])
+        row = by_craft.get(pos["id"]) if pos["kind"] == "craft" else by_id.get(pos["id"])
         if row is not None and pos.get("last_tick") != iso:
             TICKS[pos["kind"]](pos, row, today)
             pos["last_tick"] = iso
@@ -366,6 +463,12 @@ def roll(state, picks, queue, by_id, today):
             live.append(pos)
             keys.add(("season", r["id"]))
             opened += 1
+    for c in crafts:
+        if c.get("dead") is not False or ("craft", c["key"]) in keys:
+            continue
+        live.append(open_craft(c, today))
+        keys.add(("craft", c["key"]))
+        opened += 1
 
     dropped = max(0, len(live) - OPEN_CAP)
     return (
@@ -385,15 +488,19 @@ def summarize(state):
     positions = state.get("positions") or []
     flips = [r for r in records if r["kind"] == "flip"]
     seasons = [r for r in records if r["kind"] == "season"]
+    crafts = [r for r in records if r["kind"] == "craft"]
     n = len(flips)
     completed = [r for r in flips if r["outcome"] == "closed"]
     scored = [r for r in seasons if r["outcome"] == "closed" and r["ret"] is not None]
+    craft_closed = [r for r in crafts if r["outcome"] == "closed"]
     pred_net = sum(r["pred_net"] for r in flips)
+    craft_spent = sum(r["spent"] for r in crafts)
     return {
         "since": state.get("since"),
         "open": {
             "flip": sum(1 for p in positions if p["kind"] == "flip"),
             "season": sum(1 for p in positions if p["kind"] == "season"),
+            "craft": sum(1 for p in positions if p["kind"] == "craft"),
         },
         "flip": {
             "n": n,
@@ -420,6 +527,16 @@ def summarize(state):
             "unfilled": sum(1 for r in seasons if r["outcome"] == "unfilled"),
             "med_ret": _med([r["ret"] for r in scored]),
             "med_pred_ret": _med([r["pred_ret"] for r in scored]),
+        },
+        "craft": {
+            "n": len(crafts),
+            "completed": len(craft_closed),
+            "unfilled": sum(1 for r in crafts if r["outcome"] == "unfilled"),
+            "net": round(sum(r["net"] for r in crafts)),
+            "net_pct": round(sum(r["net"] for r in crafts) / craft_spent, 3)
+            if craft_spent > 0
+            else None,
+            "med_net_pct": _med([r["net_pct"] for r in crafts]),
         },
     }
 
@@ -576,13 +693,66 @@ def season_rows(records):
     return out
 
 
+def _craft_link(r):
+    if not r.get("output_id"):
+        return escape(r["name"])
+    return (
+        f'<a href="https://www.gw2bltc.com/en/item/{r["output_id"]}">'
+        f'{escape(r["name"])}</a>'
+    )
+
+
+def craft_open_rows(positions):
+    out = []
+    for p in positions:
+        if p["kind"] != "craft":
+            continue
+        out.append(
+            (
+                _craft_link(p),
+                p["opened"],
+                f"{p['crafted']} / {p['days']}",
+                money(p["spent"]),
+                money(p["revenue"]),
+                pct(p["last_spread"], 1),
+            )
+        )
+    return out[:TABLE_ROWS]
+
+
+def craft_rows(records):
+    out = []
+    for r in reversed(records):
+        if r["kind"] != "craft":
+            continue
+        out.append(
+            (
+                _craft_link(r),
+                r["opened"],
+                r["closed"],
+                f'<span class="o-{r["outcome"]}">{r["outcome"]}</span>',
+                f"{r['crafted']} / {r['days']}",
+                money(r["spent"]),
+                money(r["revenue"]),
+                money(r["net"]),
+                pct(r["net_pct"], 1),
+                pct(r["pred_spread"], 1),
+            )
+        )
+        if len(out) >= TABLE_ROWS:
+            break
+    return out
+
+
 def render(state, summary, generated):
     o = summary["open"]
     html = TEMPLATE
     html = html.replace("__GENERATED__", generated)
     html = html.replace("__SINCE__", summary["since"] or generated[:10])
     html = html.replace(
-        "__OPEN__", f"{o['flip']} flip, {o['season']} seasonal positions open"
+        "__OPEN__",
+        f"{o['flip']} flip, {o['season']} seasonal, {o['craft']} craft-carry "
+        "positions open",
     )
     html = html.replace("__SCORE__", scoreboard_html(summary))
     html = html.replace(
@@ -630,6 +800,34 @@ def render(state, summary, generated):
         "__SEASON_CLOSED__",
         f"<h3>Resolved holds</h3>{closed_holds}" if closed_holds else "",
     )
+    c = summary["craft"]
+    if c["completed"]:
+        chead = (
+            f"{c['completed']} resolved week(s), net {money(c['net'])}, median "
+            f"realized {pct(c['med_net_pct'], 1)} of spend"
+        )
+    else:
+        chead = (
+            "No craft-carry week has resolved yet; a position resolves "
+            f"after {CRAFT_HORIZON_DAYS} days."
+        )
+    html = html.replace("__CRAFT_META__", chead)
+    craft_open = _table(
+        ["Refinement", "Opened", "Crafted", "Spent", "Revenue", "Spread"],
+        craft_open_rows(state["positions"]),
+    )
+    html = html.replace(
+        "__CRAFT_OPEN__", craft_open or "<p>No craft carry is open right now.</p>"
+    )
+    craft_closed = _table(
+        ["Refinement", "Opened", "Closed", "Outcome", "Crafted", "Spent",
+         "Revenue", "Net", "Realized", "Predicted"],
+        craft_rows(state["records"]),
+    )
+    html = html.replace(
+        "__CRAFT_CLOSED__",
+        f"<h3>Resolved weeks</h3>{craft_closed}" if craft_closed else "",
+    )
     return html
 
 
@@ -662,6 +860,9 @@ def main(store=None, snapshot=None, today=None):
     by_id = {it["id"]: it for it in snapshot if it.get("id") is not None}
     today = today or datetime.now(timezone.utc).date()
 
+    craft_points = (store.get_json_gz(CRAFT_KEY) or {}).get("points") or []
+    crafts = craft_points[-1]["chains"] if craft_points else []
+
     state = {
         "since": None,
         "positions": [],
@@ -675,7 +876,7 @@ def main(store=None, snapshot=None, today=None):
     if prev_closed:
         state["records"] = prev_closed.get("records") or []
 
-    state, stats = roll(state, picks, queue, by_id, today)
+    state, stats = roll(state, picks, queue, by_id, today, crafts)
     summary = summarize(state)
 
     store.put_json_gz(
@@ -793,6 +994,18 @@ listings on the days the ask sits under its pay-up-to ceiling, and is marked
 out over the prices observed inside its sell window. Cycles run for months,
 so most holds sit open; one that ages out before its window is marked at the
 last ask and labelled marked, not scored.</p>
+</div>
+<h2>Time-gated craft carry</h2>
+<div class="meta">__CRAFT_META__</div>
+<h3>Open positions</h3>
+__CRAFT_OPEN__
+__CRAFT_CLOSED__
+<div class="notes">
+<p>A craft-carry position opens the day a refinement's spread clears the
+15% tax hurdle (invest.craft, docs/INVESTING.md's S8) and resolves after a
+week, matching its "sell weekly" cadence. Crafted counts the days that week
+the refinement still priced a spread and so was actually crafted, out of
+days observed; a day it stops pricing is simply skipped, not guessed.</p>
 </div>
 </body>
 </html>
