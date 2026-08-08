@@ -95,9 +95,13 @@ def main():
     store = Store(os.environ["S3_BUCKET"])
     series = append(store.get_json_gz(NAV_KEY) or {}, point)
     store.put_json_gz(NAV_KEY, series)
+    # This repo is public, so its Actions logs are too: never print absolute
+    # gold here, only shape. The report page is where the owner reads value,
+    # rebased to 100 (see report.invest).
+    mark_premium = point["mark"] / point["floor"] - 1 if point["floor"] else 0.0
     print(
-        f"NAV {point['d']}: floor {pnl.gold(point['floor'])}, "
-        f"mark {pnl.gold(point['mark'])}, {point['items']} items "
+        f"NAV {point['d']}: {point['items']} items ({point['unpriced']} unpriced), "
+        f"mark {mark_premium:+.1%} above floor "
         f"({len(series['points'])} points) -> s3://{store.bucket}/{NAV_KEY}"
     )
     return 0
