@@ -80,3 +80,36 @@ def test_append_caps_the_series_length():
 def test_append_starts_from_nothing():
     out = nav.append({}, {"d": "2026-08-08", "floor": 1})
     assert [p["d"] for p in out["points"]] == ["2026-08-08"]
+
+
+# --- structural floors (S7) ----------------------------------------------
+
+
+def test_build_point_without_floors_emits_the_legacy_keys_only():
+    p = nav.build_point(gathered(), PRICES, D)
+    assert "floor_classes" not in p
+    assert "stock_floor_structural" not in p
+    assert "floor_items" not in p
+
+
+def test_build_point_buckets_structural_floors_by_class():
+    floors = {24295: 1000, 424242: 4000}  # t6 fine mat, unknown -> other
+    p = nav.build_point(gathered(), PRICES, D, floors)
+    assert p["floor_classes"]["t6"] == 1000 * 10
+    assert p["floor_classes"]["other"] == 4000 * 3
+    assert p["floor_classes"]["festival"] == 0
+    assert p["stock_floor_structural"] == 1000 * 10 + 4000 * 3
+    assert p["floor_items"] == 2
+
+
+def test_build_point_with_an_empty_floor_map_still_emits_the_keys_at_zero():
+    p = nav.build_point(gathered(), PRICES, D, {})
+    assert p["stock_floor_structural"] == 0
+    assert p["floor_items"] == 0
+    assert set(p["floor_classes"]) == set(p["classes"])
+
+
+def test_structural_floors_ignore_held_items_with_no_price_row():
+    # 777 is held but unpriced, so it never reaches a class bucket at all.
+    p = nav.build_point(gathered(), PRICES, D, {777: 9_999})
+    assert p["stock_floor_structural"] == 0

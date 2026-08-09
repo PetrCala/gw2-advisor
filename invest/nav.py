@@ -13,7 +13,13 @@ headline NAV is the floor: everything dumped into the current best bid net
 of the 15% cut, per risk rule 6 in docs/INVESTING.md (optimism lives in
 theses, never in accounting); the patient sell-listing mark rides along.
 Stock is broken down by material class (invest.tags) so the report can
-show class exposure against the allocation caps.
+show class exposure against the allocation caps, and each class also
+carries its structural floor (invest.bounds, S7), which is the aggregate
+half of risk rule 7: what share of the liquidation mark is underwritten by
+a vendor price or a conversion route rather than by sentiment. That series
+cannot be backfilled - no record of past holdings or past vendor values
+exists - so it is a from-today-forward number, the same honest posture as
+the radar's documented burn-in.
 
 The series lives in the private bucket with absolute gold; the public page
 renders it rebased to 100 (report.invest), so wealth stays off the site.
@@ -24,17 +30,27 @@ import sys
 from datetime import datetime, timezone
 
 from account import pnl
-from invest import tags
+from invest import bounds, tags
 
 NAV_KEY = "invest/nav.json.gz"
 MAX_POINTS = 2000  # about five and a half years of daily points
 
 
-def build_point(gathered, prices, today):
-    """One day's NAV: totals at floor and mark, stock by class at floor."""
+def build_point(gathered, prices, today, floors=None):
+    """One day's NAV: totals at liquidation and mark, stock by class.
+
+    `floors` is {item_id: structural floor per unit in copper}
+    (invest.bounds.structural_floor, S7). Given it, the point also carries
+    floor_classes and stock_floor_structural, the aggregate half of risk
+    rule 7: how much of the liquidation mark is structurally underwritten,
+    per class and in total. Left None, the point is byte-identical to every
+    point stored before this milestone, so old series and existing callers
+    keep working untouched.
+    """
     classes = dict.fromkeys(tags.CLASSES, 0)
-    floor = mark = 0
-    unpriced = 0
+    floor_classes = dict.fromkeys(tags.CLASSES, 0)
+    floor = mark = structural = 0
+    unpriced = floor_items = 0
     for item_id, count in gathered["held"].items():
         p = prices.get(item_id)
         if not p:
@@ -44,11 +60,21 @@ def build_point(gathered, prices, today):
         item_floor = pnl.net_of_fees(buy * count)
         floor += item_floor
         mark += pnl.net_of_fees(sell * count)
-        classes[tags.classify(item_id, sell)] += item_floor
+        cls = tags.classify(item_id, sell)
+        classes[cls] += item_floor
+        if floors:
+            per_unit = floors.get(item_id)
+            if per_unit:
+                # Compared against the liquidation mark, not the ask: both
+                # sides of the ratio then mean the same thing, "what this
+                # position is worth if it has to leave today".
+                floor_classes[cls] += per_unit * count
+                structural += per_unit * count
+                floor_items += 1
     liquid = (
         gathered["coins"] + gathered["delivery_coins"] + gathered["open_buy_capital"]
     )
-    return {
+    point = {
         "d": today.isoformat(),
         "floor": liquid + floor,
         "mark": liquid + mark,
@@ -60,6 +86,11 @@ def build_point(gathered, prices, today):
         "unpriced": unpriced,
         "classes": classes,
     }
+    if floors is not None:
+        point["floor_classes"] = floor_classes
+        point["stock_floor_structural"] = structural
+        point["floor_items"] = floor_items
+    return point
 
 
 def append(series, point, cap=MAX_POINTS):
@@ -68,6 +99,29 @@ def append(series, point, cap=MAX_POINTS):
     points.append(point)
     points.sort(key=lambda p: p["d"])
     return {"points": points[-cap:]}
+
+
+def _structural_floors(held_ids, prices):
+    """{item_id: floor per unit} for the held ids that have one (S7).
+
+    Costs one extra dw2 snapshot request (vendor_value already rides in the
+    default fields, no widening needed) and one archive parse; the
+    fetch_all_prices call main() already makes supplies the conversion
+    leg's price map for free.
+    """
+    from collector import dw2
+
+    by_id = {it["id"]: it for it in dw2.fetch_snapshot() if it.get("id") is not None}
+    graph = bounds.load_graph()
+    out = {}
+    for item_id in held_ids:
+        row = by_id.get(item_id)
+        if not row:
+            continue
+        f = bounds.structural_floor(item_id, row, prices, graph)["floor"]
+        if f:
+            out[item_id] = f
+    return out
 
 
 def main():
@@ -89,8 +143,9 @@ def main():
         return 2
 
     prices = gw2api.fetch_all_prices()
+    floors = _structural_floors(gathered["held"], prices)
     today = datetime.now(timezone.utc).date()
-    point = build_point(gathered, prices, today)
+    point = build_point(gathered, prices, today, floors)
 
     store = Store(os.environ["S3_BUCKET"])
     series = append(store.get_json_gz(NAV_KEY) or {}, point)
@@ -99,9 +154,15 @@ def main():
     # gold here, only shape. The report page is where the owner reads value,
     # rebased to 100 (see report.invest).
     mark_premium = point["mark"] / point["floor"] - 1 if point["floor"] else 0.0
+    covered = (
+        point["stock_floor_structural"] / point["stock_floor"]
+        if point["stock_floor"]
+        else 0.0
+    )
     print(
         f"NAV {point['d']}: {point['items']} items ({point['unpriced']} unpriced), "
-        f"mark {mark_premium:+.1%} above floor "
+        f"mark {mark_premium:+.1%} above floor, structural floor covers "
+        f"{covered:.1%} of stock across {point['floor_items']} items "
         f"({len(series['points'])} points) -> s3://{store.bucket}/{NAV_KEY}"
     )
     return 0

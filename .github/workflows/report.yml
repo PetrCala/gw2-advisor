@@ -57,6 +57,12 @@ jobs:
         continue-on-error: true
         env:
           S3_BUCKET: ${{ vars.S3_BUCKET }}
+      # Corner screen (M6.e, S6): dw2 snapshot mirror plus one listings page.
+      # No BANKROLL_G on purpose: the corner artifact must not consume it.
+      - run: python -m invest.corner
+        continue-on-error: true
+        env:
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
       # Festival sizing reads BANKROLL_G (season.actions.enrich_all); unset
       # degrades cleanly to the flat SEASON_CAPITAL default.
       - run: python -m report.build

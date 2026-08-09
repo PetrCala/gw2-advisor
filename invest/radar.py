@@ -34,6 +34,8 @@ Usage:
 import math
 from statistics import mean, pstdev
 
+from invest import bounds
+
 TAX = 0.15  # trading post cut; duplicated per this repo's per-module-constant convention
 
 RADAR_HISTORY_CAP = 90  # rolling baseline depth; not the five-year MAX_POINTS other series use
@@ -206,11 +208,13 @@ def pump_candidates(points, low_float=RADAR_LOW_FLOAT):
 def sink_watchlist(snapshot, min_flow=SINK_MIN_FLOW):
     """Rows pinned at the vendor floor (sell_price net of tax at or below
     vendor_value) with 7-day-average sell flow at or above `min_flow`;
-    pure function of one day's snapshot, no history needed."""
+    pure function of one day's snapshot, no history needed. The vendor-floor
+    test itself lives in invest.bounds now (S7's structural floor generalizes
+    it); the behaviour here is unchanged."""
     out = []
     for it in snapshot:
         sell, vendor = it.get("sell_price"), it.get("vendor_value")
-        if not sell or not vendor or sell * (1 - TAX) > vendor:
+        if not bounds.at_vendor_floor(sell, vendor):
             continue
         flow = (it.get("7d_sell_sold") or 0) / 7
         if flow < min_flow:

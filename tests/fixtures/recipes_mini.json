@@ -1,0 +1,128 @@
+[
+  {
+    "id": "-1",
+    "name": "Forge Output",
+    "output_item_id": 1001,
+    "output_item_count": 2,
+    "output_item_count_range": "",
+    "disciplines": ["Mystic Forge"],
+    "ingredients": [
+      {"item_id": 2001, "count": 10},
+      {"item_id": 2002, "count": 5}
+    ]
+  },
+  {
+    "id": "-2",
+    "name": "Merchant Output",
+    "output_item_id": 1002,
+    "output_item_count": 1,
+    "output_item_count_range": "",
+    "disciplines": ["Merchant"],
+    "ingredients": [
+      {"item_id": 2001, "count": 3}
+    ]
+  },
+  {
+    "id": "-3",
+    "name": "Double Click Bag",
+    "output_item_id": 1003,
+    "output_item_count": 4,
+    "output_item_count_range": "",
+    "disciplines": ["Double Click"],
+    "ingredients": [
+      {"item_id": 2003, "count": 1}
+    ]
+  },
+  {
+    "id": "-4",
+    "name": "Double click lowercase",
+    "output_item_id": 1004,
+    "output_item_count": 3,
+    "output_item_count_range": "",
+    "disciplines": ["Double click"],
+    "ingredients": [
+      {"item_id": 2003, "count": 2}
+    ]
+  },
+  {
+    "id": "-5",
+    "name": "Stochastic Promotion",
+    "output_item_id": 1005,
+    "output_item_count": 88,
+    "output_item_count_range": "40-200",
+    "disciplines": ["Mystic Forge"],
+    "ingredients": [
+      {"item_id": 2001, "count": 250},
+      {"item_id": 1005, "count": 1},
+      {"item_id": 20796, "count": 1}
+    ]
+  },
+  {
+    "id": "-6",
+    "name": "Catalyst Bearing",
+    "output_item_id": 1006,
+    "output_item_count": 1,
+    "output_item_count_range": "",
+    "disciplines": ["Mystic Forge"],
+    "ingredients": [
+      {"item_id": 2002, "count": 4},
+      {"item_id": 20796, "count": 2}
+    ]
+  },
+  {
+    "id": "-7",
+    "name": "Dusk",
+    "output_item_id": 29185,
+    "output_item_count": 1,
+    "output_item_count_range": "",
+    "disciplines": ["Mystic Forge"],
+    "ingredients": [
+      {"item_id": 2002, "count": 100}
+    ]
+  },
+  {
+    "id": "-8",
+    "name": "Unpriceable Ingredient",
+    "output_item_id": 1008,
+    "output_item_count": 1,
+    "output_item_count_range": "",
+    "disciplines": ["Mystic Forge"],
+    "ingredients": [
+      {"item_id": 2001, "count": 1},
+      {"item_id": 9999, "count": 1}
+    ]
+  },
+  {
+    "id": "-9",
+    "name": "Achievement Route",
+    "output_item_id": 1009,
+    "output_item_count": 1,
+    "output_item_count_range": "",
+    "disciplines": ["Achievement"],
+    "ingredients": [
+      {"item_id": 2001, "count": 1}
+    ]
+  },
+  {
+    "id": "-10",
+    "name": "Currency Merchant Route",
+    "output_item_id": 1010,
+    "output_item_count": 1,
+    "output_item_count_range": "",
+    "disciplines": ["Merchant"],
+    "ingredients": [
+      {"item_id": -23, "count": 1}
+    ]
+  },
+  {
+    "id": "-11",
+    "name": "Stochastic Clean",
+    "output_item_id": 1011,
+    "output_item_count": 15,
+    "output_item_count_range": "10-25",
+    "disciplines": ["Mystic Forge"],
+    "ingredients": [
+      {"item_id": 2004, "count": 1}
+    ]
+  }
+]
