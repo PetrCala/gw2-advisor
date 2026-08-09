@@ -723,6 +723,61 @@ def test_summarize_counts_went_stale_records():
     assert s["luxury"]["went_stale"] == 1
 
 
+def _resolved_thesis_state():
+    """One thesis pick that fills and sells the whole lot same-tick (the
+    default row's flow), matching _resolved_luxury_state's shape."""
+    state, _ = track.roll(_empty(), [], [], {}, D0, theses=[_thesis_entry()])
+    state, _ = track.roll(
+        state, [], [], {601: _thesis_row()}, _day(1), theses=[_thesis_entry()]
+    )
+    return state
+
+
+def test_summary_counts_closed_thesis_outcomes():
+    s = track.summarize(_resolved_thesis_state())
+    assert s["thesis"]["n"] == 1
+    assert s["thesis"]["completed"] == 1  # target_hit counts as completed
+    assert s["thesis"]["net"] == 207  # revenue net of the sell-side tax, spent subtracted
+    assert s["thesis"]["net_pct"] == 0.691  # net (207.4) / pred_net (300), rounded
+    assert s["thesis"]["med_net_pct"] == 0.692
+
+
+def test_summary_thesis_completed_excludes_non_terminal_outcomes():
+    pos = track.open_thesis(_thesis_entry(invalidation_date="2099-01-01"), D0)
+    rec = track.close_thesis(pos, _day(track.THESIS_HORIZON_DAYS))
+    assert rec["outcome"] == "horizon_expired"
+    state = _empty()
+    state["records"] = [rec]
+    s = track.summarize(state)
+    assert s["thesis"]["n"] == 1
+    assert s["thesis"]["completed"] == 0  # horizon_expired is not target_hit/closed_by_human
+
+
+def test_thesis_rows_shapes_a_closed_record():
+    state = _resolved_thesis_state()
+    rows = track.thesis_rows(state["records"])
+    assert len(rows) == 1
+    name, opened, closed, outcome, filled, sold, net, pred_net, realized = rows[0]
+    assert "Thesis Item" in name
+    assert "target_hit" in outcome
+    assert filled == "3 / 3"
+    assert sold == "3"
+
+
+def test_render_shows_resolved_thesis_meta_text():
+    state = _resolved_thesis_state()
+    html = track.render(state, track.summarize(state), "2026-08-08 04:20 UTC")
+    assert "1 resolved thesis position(s)" in html
+    assert "Resolved positions" in html
+    assert "No thesis position has resolved yet" not in html
+
+
+def test_render_shows_still_collecting_thesis_meta_text_when_nothing_resolved():
+    state = _empty()
+    html = track.render(state, track.summarize(state), "2026-08-08 04:20 UTC")
+    assert "No thesis position has resolved yet" in html
+
+
 def test_the_page_renders_every_placeholder():
     state = _resolved_state()
     state["positions"].append(track.open_season(_queue_row(), D0))

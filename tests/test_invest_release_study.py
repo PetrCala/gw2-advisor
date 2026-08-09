@@ -1,7 +1,7 @@
 from datetime import date, timedelta
 
 from invest import release_study, tags
-from season import cycles, events
+from season import cycles, events, score
 
 
 # --- release_windows / release_returns (season/cycles.py) ------------------
@@ -121,6 +121,57 @@ def test_class_ids_cover_t6_and_staples_only():
     assert set(release_study.CLASS_IDS) == {"t6", "staples"}
     assert set(release_study.CLASS_IDS["t6"]) == tags.T6
     assert set(release_study.CLASS_IDS["staples"]) == tags.STAPLES
+
+
+def test_classes_from_series_wires_hit_rate_confidence_and_coverage():
+    releases = [("2022-02-28", "End of Dragons")]
+    wins = cycles.release_windows(releases)
+    win = wins["End of Dragons"]
+    series_by_id = {}
+    for t6_id in tags.T6:
+        series_by_id[t6_id] = _priced_series(win, 100.0, 150.0)  # a winning cycle
+    for s in tags.STAPLES:
+        series_by_id[s] = {}  # never priced
+
+    rows = release_study.classes_from_series(series_by_id, wins, date(2022, 3, 8))
+    by_class = {r["class"]: r for r in rows}
+
+    t6 = by_class["t6"]
+    assert t6["cycles"][0]["ret"] == round(150 * 0.85 / 100 - 1, 3)
+    assert t6["hit_rate"] == cycles.hit_rate(t6["cycles"])
+    assert t6["hit_rate"] == 1.0  # every priced launch was a gain
+    assert t6["confidence"] == score.confidence(t6["cycles"])
+    assert t6["coverage"] == {
+        "launches_priced": 1,
+        "launches_total": 1,
+        "ids_total": len(tags.T6),
+    }
+
+    staples = by_class["staples"]
+    assert staples["cycles"] == []
+    assert staples["hit_rate"] == cycles.hit_rate([])
+    assert staples["confidence"] == "low"  # empty cycles short-circuits to "low"
+    assert staples["coverage"] == {
+        "launches_priced": 0,
+        "launches_total": 1,
+        "ids_total": len(tags.STAPLES),
+    }
+
+
+def test_classes_from_series_respects_through_date():
+    # A launch still in progress relative to `today` is excluded from that
+    # class's cycles by class_cycles' own `through` handling.
+    releases = [("2022-02-28", "End of Dragons")]
+    wins = cycles.release_windows(releases)
+    win = wins["End of Dragons"]
+    series_by_id = {i: _priced_series(win, 100.0, 150.0) for i in tags.T6}
+    for s in tags.STAPLES:
+        series_by_id[s] = {}
+
+    rows = release_study.classes_from_series(series_by_id, wins, date(2022, 3, 1))
+    t6 = next(r for r in rows if r["class"] == "t6")
+    assert t6["cycles"] == []
+    assert t6["coverage"]["launches_priced"] == 0
 
 
 # --- season/events.next_release ---------------------------------------

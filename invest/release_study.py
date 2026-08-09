@@ -96,13 +96,12 @@ def class_cycles(item_ids, series_by_id, windows, through=None):
     return out
 
 
-def build_classes(store, today):
-    """[{class, cycles, hit_rate, confidence, coverage}] for t6 and
-    staples, both always emitted regardless of n."""
-    windows = cycles.release_windows(events.RELEASES)
-    all_ids = sorted({i for ids in CLASS_IDS.values() for i in ids})
-    series_by_id = load_series(store, all_ids)
-
+def classes_from_series(series_by_id, windows, today):
+    """[{class, cycles, hit_rate, confidence, coverage}] for t6 and staples,
+    both always emitted regardless of n. Pure aggregation over an already-
+    loaded `series_by_id`, split out from build_classes so this logic is
+    testable without a Store or pyarrow, the same way class_cycles already
+    takes series_by_id directly."""
     out = []
     for cls, ids in CLASS_IDS.items():
         cyc = class_cycles(ids, series_by_id, windows, through=today)
@@ -120,6 +119,16 @@ def build_classes(store, today):
             }
         )
     return out
+
+
+def build_classes(store, today):
+    """[{class, cycles, hit_rate, confidence, coverage}] for t6 and
+    staples, both always emitted regardless of n. Loads series from `store`
+    then delegates the aggregation to classes_from_series."""
+    windows = cycles.release_windows(events.RELEASES)
+    all_ids = sorted({i for ids in CLASS_IDS.values() for i in ids})
+    series_by_id = load_series(store, all_ids)
+    return classes_from_series(series_by_id, windows, today)
 
 
 def main():
