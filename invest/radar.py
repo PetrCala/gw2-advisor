@@ -18,10 +18,14 @@ three passes over the daily dw2 snapshot that need no thesis to run.
   above.
 
 The rolling history is self-collected starting from this milestone: there
-is no backfill bootstrap, so the z-score screen has a real ~90-day burn-in
-where its table is empty or partial. That is expected and correct, not a
-bug; report.invest renders an explicit "still collecting the baseline"
-message during it rather than a blank section.
+is no backfill bootstrap, so the z-score screen has a real burn-in where
+its table is empty. RADAR_MIN_OBS (below) is what actually gates a single
+zscore() call, so the screen starts flagging once RADAR_MIN_OBS + 1 days
+of history exist, not after RADAR_HISTORY_CAP (90) days; report.invest
+renders an explicit "still collecting the baseline" message until then,
+not a blank section. The baseline keeps deepening toward the 90-day cap
+after that point, so flags in the first few weeks rest on a thinner
+sample than flags months in - read early hits with that in mind.
 
 Usage:
     python -m invest.radar    # needs S3_BUCKET; no GW2_API_KEY required
@@ -29,8 +33,6 @@ Usage:
 
 import math
 from statistics import mean, pstdev
-
-from collector import dw2
 
 TAX = 0.15  # trading post cut; duplicated per this repo's per-module-constant convention
 
@@ -45,9 +47,10 @@ RADAR_PUMP_PCT = 0.04  # GE-Central-style: a single day's move counted as "up"
 RADAR_LOW_FLOAT = 300  # resting depth (both sides) under which a pump is retail-thin
 SINK_MIN_FLOW = 100  # units/day, 7-day average, floor for the sink watchlist
 
-# The widened field list: SNAPSHOT_FIELDS plus the four listed/delisted
-# columns, confirmed live on the same endpoint at zero extra request cost.
-RADAR_FIELDS = dw2.SNAPSHOT_FIELDS + ",1d_buy_listed,1d_sell_listed,1d_buy_delisted,1d_sell_delisted"
+# The widened field list is dw2.SNAPSHOT_FIELDS plus the four listed/
+# delisted columns, confirmed live on the same endpoint at zero extra
+# request cost. Built in main() (see _radar_fields()), not here, so this
+# module stays importable with stdlib only, matching invest.nav/luxury/craft.
 
 RADAR_KEY = "invest/radar/latest.json.gz"
 HISTORY_KEY = "invest/radar/history.json.gz"
@@ -228,14 +231,20 @@ def sink_watchlist(snapshot, min_flow=SINK_MIN_FLOW):
 # --- entry point -----------------------------------------------------------
 
 
+def _radar_fields(dw2):
+    """SNAPSHOT_FIELDS widened with the four listed/delisted columns."""
+    return dw2.SNAPSHOT_FIELDS + ",1d_buy_listed,1d_sell_listed,1d_buy_delisted,1d_sell_delisted"
+
+
 def main():
     import os
     from datetime import datetime, timezone
 
+    from collector import dw2
     from collector.s3store import Store
 
     store = Store(os.environ["S3_BUCKET"])
-    snap = dw2.fetch_snapshot(fields=RADAR_FIELDS)
+    snap = dw2.fetch_snapshot(fields=_radar_fields(dw2))
     today = datetime.now(timezone.utc).date()
     point = {"d": today.isoformat(), "items": build_point(snap)}
 

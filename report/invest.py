@@ -35,7 +35,7 @@ from invest.craft import CRAFT_KEY
 from invest.index import BENCH_KEY, trailing_return
 from invest.luxury import LUXURY_KEY
 from invest.nav import NAV_KEY
-from invest.radar import RADAR_KEY, RADAR_MIN_OBS
+from invest.radar import RADAR_KEY, RADAR_MIN_OBS, RADAR_Z_THRESHOLD
 from invest.release_study import RELEASES_KEY
 
 SITE = Path(__file__).resolve().parent.parent / "site"
@@ -463,10 +463,15 @@ def radar_table(payload):
             "fills this in.</p>"
         )
     history_days = radar.get("history_days") or 0
-    if history_days < RADAR_MIN_OBS:
+    # invest.radar.radar_rows drops today's point into the baseline (see
+    # `*baseline, latest = points`), so the baseline is history_days - 1
+    # points; it needs RADAR_MIN_OBS of those before a z-score is trusted,
+    # i.e. history_days >= RADAR_MIN_OBS + 1.
+    radar_min_days = RADAR_MIN_OBS + 1
+    if history_days < radar_min_days:
         return (
             f"<p>Still collecting the rolling baseline ({history_days} of "
-            f"{RADAR_MIN_OBS} minimum days); the abnormal-activity and pump "
+            f"{radar_min_days} minimum days); the abnormal-activity and pump "
             "screens fill in once enough history has accumulated. The sink "
             "watchlist below needs no history and is live already.</p>"
         )
@@ -486,7 +491,7 @@ def radar_table(payload):
     abnormal_html = (
         f"<h3>Abnormal activity ({len(abnormal)} flagged)</h3>"
         "<table><thead><tr><th>Item</th><th>|z| >= "
-        f"{radar.get('z_threshold', 4.0):g} on</th></tr></thead>"
+        f"{RADAR_Z_THRESHOLD:g} on</th></tr></thead>"
         f"<tbody>{abnormal_body}</tbody></table>"
         if abnormal
         else f"<h3>Abnormal activity</h3><p>Nothing flagged today.</p>"
