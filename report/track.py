@@ -69,9 +69,10 @@ from html import escape
 from pathlib import Path
 from statistics import median
 
-from invest import luxury
+from invest import luxury, risk
 from invest.craft import CRAFT_KEY
 from invest.luxury import LUXURY_KEY
+from invest.thesis import THESIS_HORIZON_DAYS
 from scorers import flip
 
 SITE = Path(__file__).resolve().parent.parent / "site"
@@ -98,6 +99,7 @@ STRATEGY = {
     "season": "festival carry",
     "craft": "time-gated crafting",
     "luxury": "luxury desk",
+    "thesis": "thesis registry",
 }
 
 # Open positions carry running aggregates, so a field added later would make
@@ -244,6 +246,43 @@ def open_luxury(pick, today):
     }
 
 
+def open_thesis(row, today):
+    """A thesis registry entry (bucket == "active") as a paper position,
+    near-verbatim copy of open_flip. id is the registry's own string key
+    (invest.craft.CHAINS's own "key" convention), not the GW2 item id;
+    item_id carries that separately for ticking against the daily
+    snapshot and for display links. buy_at/sell_at are entry_ceiling/
+    target taken as-is (already set by the human and sized by
+    invest.thesis, not gap-walked here)."""
+    return {
+        "v": SCHEMA,
+        "kind": "thesis",
+        "strategy": STRATEGY["thesis"],
+        "id": row["key"],
+        "item_id": row["id"],
+        "name": row.get("name") or f"item {row['id']}",
+        "opened": today.isoformat(),
+        "buy_at": row["entry_ceiling"],
+        "sell_at": row["target"],
+        "qty": row["qty"],
+        "margin": row["target"] - row["entry_ceiling"],
+        "invalidation_date": row.get("invalidation_date"),
+        "days": 0,
+        "filled": 0.0,
+        "sold": 0.0,
+        "spent": 0.0,
+        "revenue": 0.0,
+        "buy_front_days": 0,
+        "sell_front_days": 0,
+        "filled_day": None,
+        "sold_day": None,
+        "closed_by_human": False,
+        "last_bid": None,
+        "last_ask": None,
+        "last_tick": None,
+    }
+
+
 # --- daily observation ---------------------------------------------------
 
 
@@ -359,7 +398,39 @@ def tick_luxury(pos, row, today):
             pos["sold_day"] = pos["days"]
 
 
-TICKS = {"flip": tick_flip, "season": tick_season, "craft": tick_craft, "luxury": tick_luxury}
+def tick_thesis(pos, row, today):
+    """Advance one thesis position by a day: copy of tick_flip, ticked
+    against the daily snapshot row for invest.thesis's own item id."""
+    bid, ask = row.get("buy_price"), row.get("sell_price")
+    pos["days"] += 1
+    if bid:
+        pos["last_bid"] = bid
+    if ask:
+        pos["last_ask"] = ask
+
+    if pos["filled"] < pos["qty"] - EPS and bid and bid <= pos["buy_at"]:
+        flow = _f(row.get("1d_buy_sold"))
+        pos["buy_front_days"] += 1
+        units = min(pos["qty"] - pos["filled"], CAPTURE * flow)
+        pos["filled"] += units
+        pos["spent"] += units * pos["buy_at"]
+        if pos["filled"] >= pos["qty"] - EPS and pos["filled_day"] is None:
+            pos["filled_day"] = pos["days"]
+
+    if pos["sold"] < pos["filled"] - EPS and ask and ask >= pos["sell_at"]:
+        flow = _f(row.get("1d_sell_sold"))
+        pos["sell_front_days"] += 1
+        units = min(pos["filled"] - pos["sold"], CAPTURE * flow)
+        pos["sold"] += units
+        pos["revenue"] += units * (pos["sell_at"] - 1) * (1 - TAX)
+        if pos["sold"] >= pos["qty"] - EPS and pos["sold_day"] is None:
+            pos["sold_day"] = pos["days"]
+
+
+TICKS = {
+    "flip": tick_flip, "season": tick_season, "craft": tick_craft,
+    "luxury": tick_luxury, "thesis": tick_thesis,
+}
 
 
 # --- resolution ----------------------------------------------------------
@@ -369,7 +440,11 @@ def is_done(pos, today):
     """A flip or luxury pick resolves on a finished round trip or at its
     horizon; a seasonal hold when its sell window has passed, or early once
     its entry is gone; a craft carry weekly, on a fixed horizon
-    (docs/INVESTING.md's "sell weekly" cadence)."""
+    (docs/INVESTING.md's "sell weekly" cadence); a thesis position on a
+    target hit, the registry's own invalidation date, a human status:
+    closed override (checked first: it is how the human records that the
+    real in-game decision is already made), or the safety-net horizon,
+    whichever comes first."""
     iso = today.isoformat()
     age = _days(pos["opened"], today)
     if pos["kind"] == "flip":
@@ -378,6 +453,14 @@ def is_done(pos, today):
         return age >= CRAFT_HORIZON_DAYS
     if pos["kind"] == "luxury":
         return pos["sold"] >= pos["qty"] - EPS or age >= LUXURY_HORIZON_DAYS
+    if pos["kind"] == "thesis":
+        if pos.get("closed_by_human"):
+            return True
+        if pos["sold"] >= pos["qty"] - EPS:
+            return True
+        if pos.get("invalidation_date") and iso > pos["invalidation_date"]:
+            return True
+        return age >= THESIS_HORIZON_DAYS
     if iso > pos["sell_closes"] or age >= SEASON_HORIZON_DAYS:
         return True
     return pos["filled"] <= EPS and iso > pos["buy_closes"]
@@ -537,13 +620,57 @@ def close_luxury(pos, today):
     }
 
 
-CLOSERS = {"flip": close_flip, "season": close_season, "craft": close_craft, "luxury": close_luxury}
+def close_thesis(pos, today):
+    """Book the position: copy of close_flip's accounting, with an outcome
+    vocabulary distinct from flip's (target_hit/invalidated/
+    horizon_expired/closed_by_human) since a thesis resolves against the
+    registry's own dates and overrides rather than a predicted trip
+    length."""
+    held = max(0.0, pos["filled"] - pos["sold"])
+    mark = pos["last_bid"] or pos["buy_at"]
+    residual = held * mark * (1 - TAX)
+    net = pos["revenue"] + residual - pos["spent"]
+    pred_net = pos["margin"] * pos["qty"]
+    iso = today.isoformat()
+    if pos.get("closed_by_human"):
+        outcome = "closed_by_human"
+    elif pos["sold"] >= pos["qty"] - EPS:
+        outcome = "target_hit"
+    elif pos.get("invalidation_date") and iso > pos["invalidation_date"]:
+        outcome = "invalidated"
+    else:
+        outcome = "horizon_expired"
+    return {
+        "kind": "thesis",
+        "strategy": pos.get("strategy", STRATEGY["thesis"]),
+        "id": pos["id"],
+        "item_id": pos["item_id"],
+        "name": pos["name"],
+        "opened": pos["opened"],
+        "closed": today.isoformat(),
+        "outcome": outcome,
+        "qty": pos["qty"],
+        "filled": round(pos["filled"], 1),
+        "sold": round(pos["sold"], 1),
+        "days": pos["days"],
+        "buy_front_days": pos["buy_front_days"],
+        "sell_front_days": pos["sell_front_days"],
+        "pred_net": round(pred_net, 1),
+        "net": round(net, 1),
+        "net_pct": round(net / pred_net, 3) if pred_net > 0 else None,
+    }
+
+
+CLOSERS = {
+    "flip": close_flip, "season": close_season, "craft": close_craft,
+    "luxury": close_luxury, "thesis": close_thesis,
+}
 
 
 # --- the daily roll ------------------------------------------------------
 
 
-def roll(state, picks, queue, by_id, today, crafts=(), luxury_picks=()):
+def roll(state, picks, queue, by_id, today, crafts=(), luxury_picks=(), theses=()):
     """One day of tracking: observe, resolve, then open today's picks.
 
     Positions are keyed by (kind, item): an item already being tracked is
@@ -553,17 +680,29 @@ def roll(state, picks, queue, by_id, today, crafts=(), luxury_picks=()):
     craft positions key on the chain's string key rather than a GW2 item id,
     so they get their own lookup instead of sharing by_id. luxury_picks is
     invest.luxury.build_picks' output; those key on the GW2 item id, so they
-    share by_id like flip picks do.
+    share by_id like flip picks do. theses is invest.thesis.enrich_all's
+    output (every bucket, not just active): thesis positions tick against
+    by_id via their own item id, and a status: closed override in the
+    live registry marks the matching open position for immediate closure.
     """
     iso = today.isoformat()
     positions = [p for p in (state.get("positions") or []) if p.get("v") == SCHEMA]
     records = list(state.get("records") or [])
     since = state.get("since") or iso
     by_craft = {c["key"]: c for c in crafts}
+    by_thesis = {t["key"]: t for t in theses if t.get("key")}
 
     live, closed_now = [], []
     for pos in positions:
-        row = by_craft.get(pos["id"]) if pos["kind"] == "craft" else by_id.get(pos["id"])
+        if pos["kind"] == "craft":
+            row = by_craft.get(pos["id"])
+        elif pos["kind"] == "thesis":
+            row = by_id.get(pos.get("item_id"))
+            treg = by_thesis.get(pos["id"])
+            if treg and treg.get("status") == "closed":
+                pos["closed_by_human"] = True
+        else:
+            row = by_id.get(pos["id"])
         if row is not None and pos.get("last_tick") != iso:
             TICKS[pos["kind"]](pos, row, today)
             pos["last_tick"] = iso
@@ -601,6 +740,14 @@ def roll(state, picks, queue, by_id, today, crafts=(), luxury_picks=()):
         live.append(open_luxury(p, today))
         keys.add(("luxury", p["id"]))
         opened += 1
+    for t in theses:
+        if t.get("bucket") != "active" or not t.get("qty"):
+            continue
+        if ("thesis", t.get("key")) in keys:
+            continue
+        live.append(open_thesis(t, today))
+        keys.add(("thesis", t["key"]))
+        opened += 1
 
     dropped = max(0, len(live) - OPEN_CAP)
     return (
@@ -622,14 +769,17 @@ def summarize(state):
     seasons = [r for r in records if r["kind"] == "season"]
     crafts = [r for r in records if r["kind"] == "craft"]
     luxuries = [r for r in records if r["kind"] == "luxury"]
+    theses = [r for r in records if r["kind"] == "thesis"]
     n = len(flips)
     completed = [r for r in flips if r["outcome"] == "closed"]
     scored = [r for r in seasons if r["outcome"] == "closed" and r["ret"] is not None]
     craft_closed = [r for r in crafts if r["outcome"] == "closed"]
     lux_completed = [r for r in luxuries if r["outcome"] == "closed"]
+    thesis_completed = [r for r in theses if r["outcome"] in ("target_hit", "closed_by_human")]
     pred_net = sum(r["pred_net"] for r in flips)
     craft_spent = sum(r["spent"] for r in crafts)
     lux_pred_net = sum(r["pred_net"] for r in luxuries)
+    thesis_pred_net = sum(r["pred_net"] for r in theses)
     return {
         "since": state.get("since"),
         "open": {
@@ -637,6 +787,7 @@ def summarize(state):
             "season": sum(1 for p in positions if p["kind"] == "season"),
             "craft": sum(1 for p in positions if p["kind"] == "craft"),
             "luxury": sum(1 for p in positions if p["kind"] == "luxury"),
+            "thesis": sum(1 for p in positions if p["kind"] == "thesis"),
         },
         "flip": {
             "n": n,
@@ -690,6 +841,15 @@ def summarize(state):
             else None,
             "med_net_pct": _med([r["net_pct"] for r in luxuries]),
             "went_stale": sum(1 for r in luxuries if r["went_stale"]),
+        },
+        "thesis": {
+            "n": len(theses),
+            "completed": len(thesis_completed),
+            "net": round(sum(r["net"] for r in theses)),
+            "net_pct": round(sum(r["net"] for r in theses) / thesis_pred_net, 3)
+            if thesis_pred_net > 0
+            else None,
+            "med_net_pct": _med([r["net_pct"] for r in theses]),
         },
     }
 
@@ -796,7 +956,21 @@ def flip_rows(records):
     return out
 
 
-def season_open_rows(positions):
+def _launch_flag(item_id, today):
+    """"Name in Nd" for a farmable position approaching an expansion
+    launch, computed fresh at render time (never stored, like every other
+    calendar field in this module); "" without one or without an item id
+    at all (a craft chain with no single tradable output never flags)."""
+    if item_id is None:
+        return ""
+    found = risk.launch_risk(item_id, today)
+    if not found:
+        return ""
+    label, days_until = found
+    return f"{label} in {days_until}d"
+
+
+def season_open_rows(positions, today):
     out = []
     for p in positions:
         if p["kind"] != "season":
@@ -817,6 +991,7 @@ def season_open_rows(positions):
                 pct(mark, 1),
                 f"{p['sell_opens']} to {p['sell_closes']}",
                 pct(p["pred_ret"]),
+                _launch_flag(p["id"], today),
             )
         )
     return out[:TABLE_ROWS]
@@ -855,7 +1030,7 @@ def _craft_link(r):
     )
 
 
-def craft_open_rows(positions):
+def craft_open_rows(positions, today):
     out = []
     for p in positions:
         if p["kind"] != "craft":
@@ -868,6 +1043,7 @@ def craft_open_rows(positions):
                 money(p["spent"]),
                 money(p["revenue"]),
                 pct(p["last_spread"], 1),
+                _launch_flag(p.get("output_id"), today),
             )
         )
     return out[:TABLE_ROWS]
@@ -928,7 +1104,7 @@ def luxury_scoreboard_html(s):
     return f'<table class="score"><tbody>{body}</tbody></table>'
 
 
-def luxury_open_rows(positions):
+def luxury_open_rows(positions, today):
     out = []
     for p in positions:
         if p["kind"] != "luxury":
@@ -945,6 +1121,7 @@ def luxury_open_rows(positions):
                 money(p["last_ask"]) if p["last_ask"] else "",
                 f"{p['days']}d",
                 "stale" if p["went_stale"] else "",
+                _launch_flag(p["id"], today),
             )
         )
     return out[:TABLE_ROWS]
@@ -974,15 +1151,68 @@ def luxury_rows(records):
     return out
 
 
+def _thesis_link(p):
+    return (
+        f'<a href="https://www.gw2bltc.com/en/item/{p["item_id"]}">'
+        f'{escape(p["name"])}</a>'
+    )
+
+
+def thesis_open_rows(positions, today):
+    out = []
+    for p in positions:
+        if p["kind"] != "thesis":
+            continue
+        out.append(
+            (
+                _thesis_link(p),
+                p["opened"],
+                f"{p['filled']:,.0f} / {p['qty']:,}",
+                f"{p['sold']:,.0f}",
+                money(p["buy_at"]),
+                money(p["sell_at"]),
+                money(p["last_bid"]) if p["last_bid"] else "",
+                money(p["last_ask"]) if p["last_ask"] else "",
+                f"{p['days']}d",
+                _launch_flag(p["item_id"], today),
+            )
+        )
+    return out[:TABLE_ROWS]
+
+
+def thesis_rows(records):
+    out = []
+    for r in reversed(records):
+        if r["kind"] != "thesis":
+            continue
+        out.append(
+            (
+                _thesis_link(r),
+                r["opened"],
+                r["closed"],
+                f'<span class="o-{r["outcome"]}">{r["outcome"]}</span>',
+                f"{r['filled']:,.0f} / {r['qty']:,}",
+                f"{r['sold']:,.0f}",
+                money(r["net"]),
+                money(r["pred_net"]),
+                pct(r["net_pct"]),
+            )
+        )
+        if len(out) >= TABLE_ROWS:
+            break
+    return out
+
+
 def render(state, summary, generated):
     o = summary["open"]
+    today = datetime.now(timezone.utc).date()
     html = TEMPLATE
     html = html.replace("__GENERATED__", generated)
     html = html.replace("__SINCE__", summary["since"] or generated[:10])
     html = html.replace(
         "__OPEN__",
         f"{o['flip']} flip, {o['season']} seasonal, {o['craft']} craft-carry, "
-        f"{o['luxury']} luxury desk positions open",
+        f"{o['luxury']} luxury desk, {o['thesis']} thesis positions open",
     )
     html = html.replace("__SCORE__", scoreboard_html(summary))
     html = html.replace(
@@ -1013,8 +1243,9 @@ def render(state, summary, generated):
         [
             "Item", "Event", "Opened", "Bought", "Avg cost", "Now",
             "Pay up to", "Unrealized", "Sell window", "Predicted ret",
+            "Launch risk",
         ],
-        season_open_rows(state["positions"]),
+        season_open_rows(state["positions"], today),
     )
     html = html.replace(
         "__SEASON_OPEN__", open_holds or "<p>No hold is open right now.</p>"
@@ -1043,8 +1274,8 @@ def render(state, summary, generated):
         )
     html = html.replace("__CRAFT_META__", chead)
     craft_open = _table(
-        ["Refinement", "Opened", "Crafted", "Spent", "Revenue", "Spread"],
-        craft_open_rows(state["positions"]),
+        ["Refinement", "Opened", "Crafted", "Spent", "Revenue", "Spread", "Launch risk"],
+        craft_open_rows(state["positions"], today),
     )
     html = html.replace(
         "__CRAFT_OPEN__", craft_open or "<p>No craft carry is open right now.</p>"
@@ -1062,9 +1293,9 @@ def render(state, summary, generated):
     open_luxury_positions = _table(
         [
             "Item", "Opened", "Bought", "Sold", "Bid at", "Ask at",
-            "Bid now", "Ask now", "Age", "Patience",
+            "Bid now", "Ask now", "Age", "Patience", "Launch risk",
         ],
-        luxury_open_rows(state["positions"]),
+        luxury_open_rows(state["positions"], today),
     )
     html = html.replace(
         "__LUXURY_OPEN__",
@@ -1081,6 +1312,43 @@ def render(state, summary, generated):
         "__LUXURY_CLOSED__",
         f"<h3>Resolved picks</h3>{closed_luxury_positions}"
         if closed_luxury_positions
+        else "",
+    )
+    t = summary["thesis"]
+    if t["completed"]:
+        thead = (
+            f"{t['completed']} resolved thesis position(s), net {money(t['net'])}, "
+            f"median realized {pct(t['med_net_pct'], 1)} of predicted"
+        )
+    else:
+        thead = (
+            "No thesis position has resolved yet; a position resolves on a "
+            "target hit, its invalidation date, a human status: closed "
+            f"override, or the {THESIS_HORIZON_DAYS}-day safety-net horizon, "
+            "whichever comes first."
+        )
+    html = html.replace("__THESIS_META__", thead)
+    thesis_open = _table(
+        [
+            "Item", "Opened", "Bought", "Sold", "Ceiling", "Target",
+            "Bid now", "Ask now", "Age", "Launch risk",
+        ],
+        thesis_open_rows(state["positions"], today),
+    )
+    html = html.replace(
+        "__THESIS_OPEN__", thesis_open or "<p>No thesis position is open right now.</p>"
+    )
+    closed_thesis_positions = _table(
+        [
+            "Item", "Opened", "Closed", "Outcome", "Bought", "Sold",
+            "Net", "Predicted net", "Realized",
+        ],
+        thesis_rows(state["records"]),
+    )
+    html = html.replace(
+        "__THESIS_CLOSED__",
+        f"<h3>Resolved positions</h3>{closed_thesis_positions}"
+        if closed_thesis_positions
         else "",
     )
     return html
@@ -1102,7 +1370,9 @@ def main(store=None, snapshot=None, today=None):
         print("no site/data.json; nothing to track")
         return
     picks = data.get("picks") or []
-    queue = (_read(SITE / "actions.json", {}) or {}).get("queue") or []
+    actions_doc = _read(SITE / "actions.json", {}) or {}
+    queue = actions_doc.get("queue") or []
+    theses = actions_doc.get("theses") or []
 
     if store is None:
         from collector.s3store import Store
@@ -1132,7 +1402,7 @@ def main(store=None, snapshot=None, today=None):
     if prev_closed:
         state["records"] = prev_closed.get("records") or []
 
-    state, stats = roll(state, picks, queue, by_id, today, crafts, luxury_picks)
+    state, stats = roll(state, picks, queue, by_id, today, crafts, luxury_picks, theses)
     summary = summarize(state)
 
     store.put_json_gz(
@@ -1193,6 +1463,8 @@ td a:hover { text-decoration: underline; }
 .g { color: #e5c07b; } .s { color: #b4b9c4; } .c { color: #b87352; }
 .o-closed { color: #7ec97f; } .o-partial { color: #e0c068; }
 .o-unfilled { color: #d97a7a; } .o-marked { color: #8ab4f8; }
+.o-target_hit { color: #7ec97f; } .o-invalidated { color: #d97a7a; }
+.o-horizon_expired { color: #8a8f9c; } .o-closed_by_human { color: #8ab4f8; }
 .r-Fine { color: #62a4da; } .r-Masterwork { color: #59b135; } .r-Rare { color: #fcd00b; }
 .r-Exotic { color: #ffa405; } .r-Ascended { color: #fb3e8d; } .r-Legendary { color: #a675f0; }
 .notes { color: #8a8f9c; font-size: 13px; margin-top: 24px; }
@@ -1277,6 +1549,22 @@ Patience marks a position that has sat unfilled past the three-week rule
 that strategy states (invest.luxury.PATIENCE_DAYS); the daily snapshot
 carries no order book to actually reprice against mid-simulation, so this
 flags the rule firing rather than simulating the repriced fill.</p>
+</div>
+<h2>Thesis registry</h2>
+<div class="meta">__THESIS_META__</div>
+<h3>Open positions</h3>
+__THESIS_OPEN__
+__THESIS_CLOSED__
+<div class="notes">
+<p>A thesis position (docs/INVESTING.md strategy S2, invest/theses.yaml)
+opens the day a registry entry's live price sits at or under its entry
+ceiling, and simulates the same buy-order/sell-listing fill mechanic as
+the flip table above. It resolves on a target hit, past the registry's own
+invalidation date, on a human status: closed override recorded in the
+registry (outcome closed_by_human, distinct from a model-driven
+resolution), or after a 45-day safety-net horizon, whichever comes first.
+Launch risk flags a farmable-class position (T6, festival, staples) with
+an expansion launch inside the next 30 days.</p>
 </div>
 </body>
 </html>

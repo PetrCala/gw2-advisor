@@ -17,6 +17,7 @@ CAPS = {
     "release basket": 0.30,
     "festival carry": 0.25,
     "luxury desk": 0.25,
+    "thesis registry": 0.20,  # M6.d, provisional: needs sign-off before real gold sizes against it
     "vault holds": 0.15,
     "corners": 0.10,
 }

@@ -37,13 +37,19 @@ HISTORY_FIELDS = (
 )
 
 
-def fetch_snapshot(session=None):
-    """Return the marketable-item snapshot as a list of dicts."""
+def fetch_snapshot(session=None, fields=None):
+    """Return the marketable-item snapshot as a list of dicts.
+
+    `fields` defaults to SNAPSHOT_FIELDS so every existing caller is
+    unaffected; invest.radar passes a widened field list (the same
+    endpoint, confirmed at zero extra request cost) to also read the
+    listed/delisted counts its abnormal-activity screen needs.
+    """
     s = session or requests.Session()
     resp = _get(
         s,
         f"{BASE}/v1/items/json",
-        params={"fields": SNAPSHOT_FIELDS, "filter": "marketable:true"},
+        params={"fields": fields or SNAPSHOT_FIELDS, "filter": "marketable:true"},
     )
     return resp.json()
 

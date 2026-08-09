@@ -125,3 +125,59 @@ def hit_rate(cycles):
     if not cycles:
         return None
     return sum(1 for c in cycles if c["ret"] > 0) / len(cycles)
+
+
+# --- absolute-calendar-date windows (RELEASES entries) --------------------
+#
+# cycle_windows/anchor_dates re-anchor a recurring day-of-year span to each
+# year's actual festival dates. A RELEASES entry is a single concrete date,
+# not a recurring span, so these two siblings do plain calendar-day offset
+# arithmetic instead - no day-of-year wrap math applies.
+
+
+def release_windows(releases, buy_offsets=(-90, -30), sell_offsets=(-7, 7)):
+    """{label: (buy_start, buy_end, sell_start, sell_end)} for every
+    `releases` entry ([(iso_date, label), ...], as season.events.RELEASES).
+
+    The sell window is deliberately kept tight (+7d, not the wider spans a
+    recurring festival window gets): S1's own text warns post-release farms
+    crash the same materials, so the exit should not linger. The buy
+    offsets (-90/-30) are unchanged from the strategy's own stated figures.
+    """
+    wins = {}
+    for iso, label in releases:
+        launch = date.fromisoformat(iso)
+        b0 = launch + timedelta(days=buy_offsets[0])
+        b1 = launch + timedelta(days=buy_offsets[1])
+        s0 = launch + timedelta(days=sell_offsets[0])
+        s1 = launch + timedelta(days=sell_offsets[1])
+        wins[label] = (b0, b1, s0, s1)
+    return wins
+
+
+def release_returns(series, windows, through=None):
+    """Realized return per launch, in `windows`' order: {label, buy, sell,
+    ret} via window_price and the same sell*(1-TAX)/buy-1 formula as
+    cycle_returns. A launch missing observed prices in either window is
+    dropped, not guessed, the same rule window_price already applies. A
+    launch whose sell window runs past `through` (a date) is still in
+    progress and excluded, independent of releases_between's cycle
+    annotation (which would be circular once this function exists).
+    """
+    out = []
+    for label, (b0, b1, s0, s1) in windows.items():
+        if through and s1 > through:
+            continue
+        buy = window_price(series, b0, b1)
+        sell = window_price(series, s0, s1)
+        if not buy or sell is None:
+            continue
+        out.append(
+            {
+                "label": label,
+                "buy": round(buy),
+                "sell": round(sell),
+                "ret": round(sell * (1 - TAX) / buy - 1, 3),
+            }
+        )
+    return out

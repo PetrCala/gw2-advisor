@@ -1,0 +1,90 @@
+# Thesis registry (S2, docs/INVESTING.md): a hand-edited, git-reviewed list
+# of item-leg convictions, each with a catalyst, a date, and an
+# invalidation rule. Parsed and validated by invest/thesis.py at report
+# build time; a malformed entry is skipped with a printed warning rather
+# than crashing the whole build.
+#
+# One entry per item leg, not one entry per thesis: this is what lets
+# report/track.py reuse the flip/luxury paper-position shape almost
+# verbatim instead of a new basket-aware tick/close path. A catalyst
+# spanning several items (a relic-wave patch touching six symbols) becomes
+# several entries sharing a `group` label, in practice via a YAML anchor
+# for the repeated catalyst/date/invalidation prose, as the worked comment
+# below demonstrates.
+#
+# Field-by-field:
+#   key                str, required, unique. The paper-tracker position id
+#                      (report/track.py), matching invest.craft.CHAINS's
+#                      own "key" convention.
+#   id                 int, required. The GW2 item id this leg trades.
+#   name               str, required. Display label, spelled out rather
+#                      than snapshot-joined so it renders before the item
+#                      goes live (bucket == watching).
+#   group              str, optional. Cosmetic clustering label.
+#   direction          "long" | "avoid", required. An "avoid" entry never
+#                      opens a paper position; it renders as a notify-only
+#                      informational warning.
+#   catalyst           str, required (block scalar). What is expected to
+#                      happen and the evidence for it.
+#   catalyst_date      ISO date, required. When the catalyst is expected.
+#   entry_ceiling      int copper, required when direction == long. Pay-up-
+#                      to price; same role as season.actions.limit_price.
+#   target             int copper, required when direction == long. Price
+#                      at which the thesis is considered to have played out.
+#   invalidation       str, required (block scalar). What would prove the
+#                      thesis wrong.
+#   invalidation_date  ISO date, required. The hard date that forces the
+#                      exit decision regardless of whether the invalidation
+#                      prose has technically been confirmed.
+#   size               int copper, required when direction == long. Capital
+#                      cap for this leg, bounded in aggregate by
+#                      invest.bankroll.CAPS["thesis registry"].
+#   opened             ISO date, required. Audit trail: when the human
+#                      added this entry.
+#   status             "watching" | "active" | "closed" | null, optional
+#                      human override. null/omitted infers the bucket from
+#                      dates and live price. status: closed forces the
+#                      paper position (if any) to close on its next tick,
+#                      tagged outcome: closed_by_human, and silences future
+#                      nags for this key; it never places or implies a real
+#                      trade.
+#   notes              str, optional (block scalar). Free-form context:
+#                      datamine links, patch-note citations, cross-checks
+#                      against the radar.
+#
+# None of entry_ceiling/target/size is the user's own holdings; per this
+# repo's existing privacy exception (the same one invest/luxury.py and
+# invest/craft.py already rely on), these are recommended-trade prices
+# about the market, not the user's wealth, so they render in gold on the
+# public site and in the daily report like every other strategy's picks.
+#
+# Example entry (not live) -- copy this shape for a real thesis:
+#
+# _relic_wave_q3_2026: &relic_wave_q3_2026
+#   group: voe-q3-relic-wave
+#   catalyst: >
+#     VoE's Q3 quarterly drop ships 6 crafted relics; each recipe consumes
+#     one Charm/Symbol-of-X material, per that_shaman's pre-patch datamine
+#     (2026-08-01).
+#   catalyst_date: 2026-09-15
+#   invalidation: >
+#     Patch ships without the relic recipes touching this symbol, or a
+#     Wizard's Vault reward track substitutes for it.
+#   invalidation_date: 2026-10-01
+#
+# theses:
+#   - key: voe-q3-relic-charms
+#     id: 89141
+#     name: Symbol of Enhancement
+#     <<: *relic_wave_q3_2026
+#     direction: long
+#     entry_ceiling: 450000       # 45g -- pay up to this
+#     target: 650000              # 65g -- thesis played out here
+#     size: 300000                # 30g capital cap for this leg
+#     opened: 2026-08-09
+#     status: null                # let the bucket infer from dates/price
+#     notes: >
+#       that_shaman thread: <link>. Cross-check against the radar's z-score
+#       once the relic wave ships.
+
+theses: []

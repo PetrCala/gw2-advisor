@@ -474,6 +474,182 @@ def test_luxury_opens_per_day_are_capped():
     assert stats["opened"] == track.LUXURY_PER_DAY
 
 
+# --- thesis registry in the daily roll -------------------------------------
+
+
+def _thesis_entry(**over):
+    e = {
+        "key": "voe-q3-relic-charms", "id": 601, "name": "Thesis Item",
+        "direction": "long", "bucket": "active", "qty": 3,
+        "entry_ceiling": 100, "target": 200,
+        "invalidation_date": "2026-12-31", "status": None,
+    }
+    e.update(over)
+    return e
+
+
+def _thesis_row(**over):
+    r = {
+        "id": 601, "buy_price": 100, "sell_price": 200,
+        "1d_buy_sold": 40, "1d_sell_sold": 40,
+    }
+    r.update(over)
+    return r
+
+
+def test_a_valid_thesis_bucket_opens_a_thesis_position():
+    state, stats = track.roll(_empty(), [], [], {}, D0, theses=[_thesis_entry()])
+    assert stats["opened"] == 1
+    assert [p["kind"] for p in state["positions"]] == ["thesis"]
+    assert state["positions"][0]["id"] == "voe-q3-relic-charms"
+    assert state["positions"][0]["item_id"] == 601
+
+
+def test_a_watching_thesis_does_not_open():
+    state, stats = track.roll(
+        _empty(), [], [], {}, D0, theses=[_thesis_entry(bucket="watching")]
+    )
+    assert stats["opened"] == 0
+
+
+def test_an_active_thesis_without_a_sized_qty_does_not_open():
+    state, stats = track.roll(
+        _empty(), [], [], {}, D0, theses=[_thesis_entry(qty=None)]
+    )
+    assert stats["opened"] == 0
+
+
+def test_a_thesis_already_tracked_is_not_opened_twice():
+    state, _ = track.roll(_empty(), [], [], {}, D0, theses=[_thesis_entry()])
+    state, stats = track.roll(state, [], [], {}, _day(1), theses=[_thesis_entry()])
+    assert stats["opened"] == 0
+    assert len(state["positions"]) == 1
+
+
+def test_an_open_thesis_position_ticks_from_the_snapshot_by_item_id():
+    state, _ = track.roll(_empty(), [], [], {}, D0, theses=[_thesis_entry()])
+    # the default row's flow fills and sells the whole lot same-tick, so the
+    # position resolves into a record rather than staying open
+    state, stats = track.roll(
+        state, [], [], {601: _thesis_row()}, _day(1), theses=[_thesis_entry()]
+    )
+    assert stats["closed"] == 1
+    assert state["records"][0]["filled"] == 3
+    assert state["records"][0]["outcome"] == "target_hit"
+
+
+def test_thesis_position_closes_on_status_closed_override():
+    state, _ = track.roll(_empty(), [], [], {}, D0, theses=[_thesis_entry()])
+    closed_entry = _thesis_entry(status="closed")
+    state, stats = track.roll(
+        state, [], [], {}, _day(1), theses=[closed_entry]
+    )
+    assert stats["closed"] == 1
+    assert state["records"][0]["outcome"] == "closed_by_human"
+
+
+# --- thesis simulation -----------------------------------------------------
+
+
+def test_open_thesis_carries_a_strategy_tag():
+    pos = track.open_thesis(_thesis_entry(), D0)
+    assert pos["strategy"] == "thesis registry"
+    assert pos["buy_at"] == 100 and pos["sell_at"] == 200
+    assert pos["margin"] == 100
+
+
+def test_a_thesis_position_that_fills_and_sells_books_the_predicted_margin():
+    pos = track.open_thesis(_thesis_entry(), D0)
+    track.tick_thesis(pos, _thesis_row(), D0)
+    assert pos["filled"] == 3 and pos["sold"] == 3
+    rec = track.close_thesis(pos, D0)
+    assert rec["outcome"] == "target_hit"
+    assert rec["pred_net"] == 300  # 3 units at the 100-copper margin
+
+
+def test_a_thesis_position_resolves_after_its_invalidation_date():
+    # invalidation_date well inside the safety-net horizon, so it is the
+    # invalidation check that fires, not the 45-day backstop
+    pos = track.open_thesis(_thesis_entry(invalidation_date="2026-08-20"), D0)
+    assert not track.is_done(pos, date(2026, 8, 20))
+    assert track.is_done(pos, date(2026, 8, 21))
+    rec = track.close_thesis(pos, date(2026, 8, 21))
+    assert rec["outcome"] == "invalidated"
+
+
+def test_a_thesis_position_resolves_at_the_safety_net_horizon():
+    pos = track.open_thesis(_thesis_entry(invalidation_date="2099-01-01"), D0)
+    assert not track.is_done(pos, _day(track.THESIS_HORIZON_DAYS - 1))
+    assert track.is_done(pos, _day(track.THESIS_HORIZON_DAYS))
+    rec = track.close_thesis(pos, _day(track.THESIS_HORIZON_DAYS))
+    assert rec["outcome"] == "horizon_expired"
+
+
+# --- launch risk column -----------------------------------------------
+
+
+def _farmable_row(**over):
+    r = {
+        "id": 1, "name": "Season Item", "event": "Halloween", "bucket": "buy_now",
+        "limit_price": 1000, "cur_price": 900, "suggested_qty": 20,
+        "buy_closes": "2026-08-20", "sell_opens": "2026-10-01",
+        "sell_closes": "2026-10-20", "med_ret": 0.4,
+    }
+    r.update(over)
+    return r
+
+
+def test_season_open_rows_includes_launch_risk_column():
+    from invest import tags
+
+    t6_id = next(iter(tags.T6))
+    pos = track.open_season(_farmable_row(id=t6_id), D0)
+    rows = track.season_open_rows([pos], date(2022, 2, 20))  # inside End of Dragons' window
+    assert rows[0][-1] != ""
+
+
+def test_craft_open_rows_includes_launch_risk_column():
+    from invest import tags
+
+    t6_id = next(iter(tags.T6))
+    pos = track.open_craft(_chain(output_id=t6_id), D0)
+    rows = track.craft_open_rows([pos], date(2022, 2, 20))
+    assert rows[0][-1] != ""
+
+
+def test_craft_open_rows_with_no_output_id_never_flags():
+    pos = track.open_craft(_chain(key="charged_quartz", output_id=None), D0)
+    rows = track.craft_open_rows([pos], date(2022, 2, 20))
+    assert rows[0][-1] == ""
+
+
+def test_luxury_open_rows_includes_launch_risk_column():
+    from invest import tags
+
+    t6_id = next(iter(tags.T6))
+    pos = track.open_luxury(_luxury_pick(id=t6_id), D0)
+    rows = track.luxury_open_rows([pos], date(2022, 2, 20))
+    assert rows[0][-1] != ""
+
+
+def test_thesis_open_rows_includes_launch_risk_column():
+    from invest import tags
+
+    t6_id = next(iter(tags.T6))
+    pos = track.open_thesis(_thesis_entry(id=t6_id), D0)
+    rows = track.thesis_open_rows([pos], date(2022, 2, 20))
+    assert rows[0][-1] != ""
+
+
+def test_launch_risk_column_is_blank_outside_the_warn_window():
+    from invest import tags
+
+    t6_id = next(iter(tags.T6))
+    pos = track.open_luxury(_luxury_pick(id=t6_id), D0)
+    rows = track.luxury_open_rows([pos], date(2020, 1, 1))
+    assert rows[0][-1] == ""
+
+
 # --- summary and page ----------------------------------------------------
 
 
@@ -496,7 +672,7 @@ def test_summary_counts_outcomes_and_compares_against_the_assumption():
     assert s["flip"]["net"] == 692
     assert s["flip"]["med_capture_needed"] == 0.25
     assert s["flip"]["capture_assumed"] == track.CAPTURE
-    assert s["open"] == {"flip": 0, "season": 0, "craft": 0, "luxury": 0}
+    assert s["open"] == {"flip": 0, "season": 0, "craft": 0, "luxury": 0, "thesis": 0}
 
 
 def test_summary_of_an_empty_record_is_all_zeroes():
@@ -552,15 +728,18 @@ def test_the_page_renders_every_placeholder():
     state["positions"].append(track.open_season(_queue_row(), D0))
     state["positions"].append(track.open_craft(_chain(), D0))
     state["positions"].append(track.open_luxury(_luxury_pick(), D0))
+    state["positions"].append(track.open_thesis(_thesis_entry(), D0))
     html = track.render(state, track.summarize(state), "2026-08-08 04:20 UTC")
     for placeholder in ("GENERATED", "SINCE", "OPEN", "SCORE", "FLIPS",
                         "SEASON_META", "SEASON_OPEN", "SEASON_CLOSED",
                         "CRAFT_META", "CRAFT_OPEN", "CRAFT_CLOSED",
-                        "LUXURY_SCORE", "LUXURY_OPEN", "LUXURY_CLOSED"):
+                        "LUXURY_SCORE", "LUXURY_OPEN", "LUXURY_CLOSED",
+                        "THESIS_META", "THESIS_OPEN", "THESIS_CLOSED"):
         assert f"__{placeholder}__" not in html
     assert "Test Item" in html and "Season Item" in html
     assert "Deldrimor Steel Ingot" in html
     assert "Luxury Item" in html
+    assert "Thesis Item" in html
     assert "Capture needed" in html
     assert "2026-08-08 04:20 UTC" in html
 

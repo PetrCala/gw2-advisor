@@ -152,6 +152,33 @@ def test_tax_matches_the_flip_scorer():
     assert cycles.TAX == flip.TAX
 
 
+# --- release windows (absolute-calendar-date, not day-of-year) ------------
+
+
+def test_release_windows_produces_fixed_offset_dates_no_wrap_math():
+    wins = cycles.release_windows([("2022-02-28", "End of Dragons")])
+    b0, b1, s0, s1 = wins["End of Dragons"]
+    assert b0 == date(2021, 11, 30) and b1 == date(2022, 1, 29)
+    assert s0 == date(2022, 2, 21) and s1 == date(2022, 3, 7)
+
+
+def test_release_returns_drop_a_launch_missing_either_window():
+    wins = cycles.release_windows([("2022-02-28", "A"), ("2023-08-22", "B")])
+    b0, b1, s0, s1 = wins["A"]
+    series = {}
+    d = b0
+    while d <= b1:
+        series[d.isoformat()] = 100.0
+        d += timedelta(days=1)
+    d = s0
+    while d <= s1:
+        series[d.isoformat()] = 150.0
+        d += timedelta(days=1)
+    out = cycles.release_returns(series, wins)
+    assert [r["label"] for r in out] == ["A"]
+    assert out[0]["ret"] == round(150 * 0.85 / 100 - 1, 3)
+
+
 # --- flow evidence ---------------------------------------------------------
 
 
@@ -265,3 +292,13 @@ def test_releases_between():
         "End of Dragons"
     ]
     assert events.releases_between(date(2016, 1, 1), date(2016, 12, 31)) == []
+
+
+def test_next_release_returns_earliest_upcoming_launch():
+    assert events.next_release(date(2022, 1, 1), date(2024, 1, 1)) == (
+        date(2022, 2, 28), "End of Dragons",
+    )
+
+
+def test_next_release_is_none_with_nothing_in_range():
+    assert events.next_release(date(2030, 1, 1), date(2030, 2, 1)) is None
