@@ -599,13 +599,17 @@ def _farmable_row(**over):
     return r
 
 
+# The Floor column sits after Launch risk on every open table, so launch
+# risk is the second-to-last cell from here on.
+
+
 def test_season_open_rows_includes_launch_risk_column():
     from invest import tags
 
     t6_id = next(iter(tags.T6))
     pos = track.open_season(_farmable_row(id=t6_id), D0)
     rows = track.season_open_rows([pos], date(2022, 2, 20))  # inside End of Dragons' window
-    assert rows[0][-1] != ""
+    assert rows[0][-2] != ""
 
 
 def test_craft_open_rows_includes_launch_risk_column():
@@ -614,13 +618,13 @@ def test_craft_open_rows_includes_launch_risk_column():
     t6_id = next(iter(tags.T6))
     pos = track.open_craft(_chain(output_id=t6_id), D0)
     rows = track.craft_open_rows([pos], date(2022, 2, 20))
-    assert rows[0][-1] != ""
+    assert rows[0][-2] != ""
 
 
 def test_craft_open_rows_with_no_output_id_never_flags():
     pos = track.open_craft(_chain(key="charged_quartz", output_id=None), D0)
     rows = track.craft_open_rows([pos], date(2022, 2, 20))
-    assert rows[0][-1] == ""
+    assert rows[0][-2] == ""
 
 
 def test_luxury_open_rows_includes_launch_risk_column():
@@ -629,7 +633,7 @@ def test_luxury_open_rows_includes_launch_risk_column():
     t6_id = next(iter(tags.T6))
     pos = track.open_luxury(_luxury_pick(id=t6_id), D0)
     rows = track.luxury_open_rows([pos], date(2022, 2, 20))
-    assert rows[0][-1] != ""
+    assert rows[0][-2] != ""
 
 
 def test_thesis_open_rows_includes_launch_risk_column():
@@ -638,7 +642,7 @@ def test_thesis_open_rows_includes_launch_risk_column():
     t6_id = next(iter(tags.T6))
     pos = track.open_thesis(_thesis_entry(id=t6_id), D0)
     rows = track.thesis_open_rows([pos], date(2022, 2, 20))
-    assert rows[0][-1] != ""
+    assert rows[0][-2] != ""
 
 
 def test_launch_risk_column_is_blank_outside_the_warn_window():
@@ -647,7 +651,157 @@ def test_launch_risk_column_is_blank_outside_the_warn_window():
     t6_id = next(iter(tags.T6))
     pos = track.open_luxury(_luxury_pick(id=t6_id), D0)
     rows = track.luxury_open_rows([pos], date(2020, 1, 1))
+    assert rows[0][-2] == ""
+
+
+# --- structural floor column (S7) ----------------------------------------
+
+
+def _snap_row(item_id, sell_price=1000, vendor_value=500):
+    return {item_id: {"id": item_id, "sell_price": sell_price,
+                      "vendor_value": vendor_value}}
+
+
+def test_floor_flag_reports_vendor_coverage_of_the_liquidation_mark():
+    # 500 vendor against 1000 x 0.85 = 850 net.
+    assert track._floor_flag(7, _snap_row(7)) == "59% vendor"
+
+
+def test_floor_flag_says_at_floor_once_coverage_reaches_one():
+    assert track._floor_flag(7, _snap_row(7, sell_price=500)) == "at floor vendor"
+
+
+def test_floor_flag_is_blank_without_an_id_a_row_or_a_floor():
+    assert track._floor_flag(None, _snap_row(7)) == ""
+    assert track._floor_flag(7, None) == ""
+    assert track._floor_flag(7, {}) == ""
+    assert track._floor_flag(7, _snap_row(7, vendor_value=0)) == ""
+
+
+def test_open_rows_render_the_floor_column_from_the_snapshot():
+    pos = track.open_luxury(_luxury_pick(id=7), D0)
+    rows = track.luxury_open_rows([pos], date(2020, 1, 1), _snap_row(7))
+    assert rows[0][-1] == "59% vendor"
+
+
+def test_open_rows_leave_the_floor_column_empty_without_a_snapshot():
+    pos = track.open_luxury(_luxury_pick(id=7), D0)
+    rows = track.luxury_open_rows([pos], date(2020, 1, 1))
     assert rows[0][-1] == ""
+
+
+# --- corners (S6) --------------------------------------------------------
+
+
+def _corner_pick(**over):
+    p = {
+        "id": 901, "name": "Corner Item", "rarity": "Exotic",
+        "strategy": "corners", "qty": 30, "avg_cost": 25_000,
+        "relist_at": 59_999, "ceiling": 60_000, "ceiling_source": "traded high",
+        "margin": 25_999, "score": 2.04,
+        "unload": {
+            "qty": 30, "relist_at": 59_999, "per_day": 2.5, "days": 12,
+            "weeks": [{"week": 1, "units": 18}, {"week": 2, "units": 12}],
+            "abort_qty": 18, "horizon_days": 90,
+        },
+    }
+    p.update(over)
+    return p
+
+
+def _corner_row(**over):
+    # 1d_sell_sold of 40 sells 10 units a day at the 0.25 unload share.
+    r = {
+        "id": 901, "buy_price": 20_000, "sell_price": 60_000,
+        "1d_sell_sold": 40, "1d_sell_listed": 0,
+    }
+    r.update(over)
+    return r
+
+
+def test_corner_opens_with_the_whole_lot_filled_at_the_ladder_vwap():
+    pos = track.open_corner(_corner_pick(), D0)
+    assert pos["spent"] == 30 * 25_000
+    assert pos["sold"] == 0.0
+    assert pos["abort_qty"] == 18
+    assert pos["entry_modeled"] == "ladder VWAP at open"
+
+
+def test_corner_sells_its_planned_share_on_a_day_it_still_owns_the_top():
+    pos = track.open_corner(_corner_pick(), D0)
+    track.tick_corner(pos, _corner_row(), _day(1))
+    assert pos["sold"] == 10
+    assert pos["held_top_days"] == 1
+    assert round(pos["revenue"], 1) == round(10 * 59_999 * 0.85, 1)
+
+
+def test_corner_position_stops_selling_on_an_undercut_day_and_counts_undercut_days():
+    pos = track.open_corner(_corner_pick(), D0)
+    track.tick_corner(pos, _corner_row(sell_price=50_000), _day(1))
+    assert pos["sold"] == 0
+    assert pos["undercut_days"] == 1
+    assert pos["held_top_days"] == 0
+
+
+def test_corner_position_aborts_once_resupply_passes_the_tripwire():
+    pos = track.open_corner(_corner_pick(), D0)
+    track.tick_corner(pos, _corner_row(**{"1d_sell_listed": 20}), _day(1))
+    assert pos["aborted"] is True
+    assert track.is_done(pos, _day(1)) is True
+    rec = track.close_corner(pos, _day(1))
+    assert rec["outcome"] == "resupplied"
+
+
+def test_corner_resolves_unloaded_once_the_whole_lot_is_gone():
+    pos = track.open_corner(_corner_pick(), D0)
+    for d in (1, 2, 3):
+        track.tick_corner(pos, _corner_row(), _day(d))
+    assert pos["sold"] == 30
+    assert track.is_done(pos, _day(3)) is True
+    assert track.close_corner(pos, _day(3))["outcome"] == "unloaded"
+
+
+def test_a_corner_that_never_owned_the_top_of_the_book_closes_undercut():
+    pos = track.open_corner(_corner_pick(), D0)
+    track.tick_corner(pos, _corner_row(sell_price=50_000), _day(1))
+    rec = track.close_corner(pos, _day(track.CORNER_HORIZON_DAYS))
+    assert rec["outcome"] == "undercut"
+
+
+def test_corner_close_marks_the_residual_at_the_last_bid_net_of_fees():
+    pos = track.open_corner(_corner_pick(), D0)
+    track.tick_corner(pos, _corner_row(), _day(1))
+    rec = track.close_corner(pos, _day(track.CORNER_HORIZON_DAYS))
+    assert rec["outcome"] == "partial"
+    expected = 10 * 59_999 * 0.85 + 20 * 20_000 * 0.85 - 750_000
+    assert rec["net"] == round(expected, 1)
+
+
+def test_roll_opens_at_most_the_concurrent_corner_limit():
+    picks = [_corner_pick(id=900 + i) for i in range(5)]
+    state, _ = track.roll(_empty(), [], [], {}, D0, corner_picks=picks)
+    assert sum(1 for p in state["positions"] if p["kind"] == "corner") == \
+        track.corner.MAX_CONCURRENT_CORNERS
+
+
+def test_roll_never_opens_a_corner_under_the_minimum_score():
+    state, _ = track.roll(
+        _empty(), [], [], {}, D0, corner_picks=[_corner_pick(score=0.5)]
+    )
+    assert state["positions"] == []
+
+
+def test_corner_summary_leads_with_the_exit_not_the_gold():
+    pos = track.open_corner(_corner_pick(), D0)
+    track.tick_corner(pos, _corner_row(sell_price=50_000), _day(1))
+    state = _empty()
+    state["records"] = [track.close_corner(pos, _day(track.CORNER_HORIZON_DAYS))]
+    k = track.summarize(state)["corner"]
+    assert k["n"] == 1
+    assert k["undercut"] == 1
+    assert k["exit_broken_pct"] == 1.0
+    assert k["med_top_days"] == 0
+    assert k["med_planned_days"] == 12
 
 
 # --- summary and page ----------------------------------------------------
@@ -672,7 +826,8 @@ def test_summary_counts_outcomes_and_compares_against_the_assumption():
     assert s["flip"]["net"] == 692
     assert s["flip"]["med_capture_needed"] == 0.25
     assert s["flip"]["capture_assumed"] == track.CAPTURE
-    assert s["open"] == {"flip": 0, "season": 0, "craft": 0, "luxury": 0, "thesis": 0}
+    assert s["open"] == {"flip": 0, "season": 0, "craft": 0, "luxury": 0,
+                         "thesis": 0, "corner": 0}
 
 
 def test_summary_of_an_empty_record_is_all_zeroes():
@@ -784,19 +939,36 @@ def test_the_page_renders_every_placeholder():
     state["positions"].append(track.open_craft(_chain(), D0))
     state["positions"].append(track.open_luxury(_luxury_pick(), D0))
     state["positions"].append(track.open_thesis(_thesis_entry(), D0))
+    state["positions"].append(track.open_corner(_corner_pick(), D0))
     html = track.render(state, track.summarize(state), "2026-08-08 04:20 UTC")
     for placeholder in ("GENERATED", "SINCE", "OPEN", "SCORE", "FLIPS",
                         "SEASON_META", "SEASON_OPEN", "SEASON_CLOSED",
                         "CRAFT_META", "CRAFT_OPEN", "CRAFT_CLOSED",
                         "LUXURY_SCORE", "LUXURY_OPEN", "LUXURY_CLOSED",
-                        "THESIS_META", "THESIS_OPEN", "THESIS_CLOSED"):
+                        "THESIS_META", "THESIS_OPEN", "THESIS_CLOSED",
+                        "CORNER_META", "CORNER_OPEN", "CORNER_CLOSED"):
         assert f"__{placeholder}__" not in html
     assert "Test Item" in html and "Season Item" in html
     assert "Deldrimor Steel Ingot" in html
     assert "Luxury Item" in html
     assert "Thesis Item" in html
+    assert "Corner Item" in html
     assert "Capture needed" in html
     assert "2026-08-08 04:20 UTC" in html
+
+
+def test_render_without_a_snapshot_still_renders_the_floor_column_empty():
+    state = _empty()
+    state["positions"] = [track.open_luxury(_luxury_pick(), D0)]
+    html = track.render(state, track.summarize(state), "now")
+    assert "<th>Floor</th>" in html
+
+
+def test_render_fills_the_floor_column_when_a_snapshot_is_passed():
+    state = _empty()
+    state["positions"] = [track.open_luxury(_luxury_pick(id=7), D0)]
+    html = track.render(state, track.summarize(state), "now", _snap_row(7))
+    assert "59% vendor" in html
 
 
 def test_the_page_escapes_item_names():

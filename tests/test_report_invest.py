@@ -1,9 +1,9 @@
 from report import invest
 
 
-def nav_series():
+def nav_series(floors=False):
     def point(d, floor, mark=None):
-        return {
+        p = {
             "d": d,
             "floor": floor,
             "mark": mark or floor,
@@ -13,6 +13,13 @@ def nav_series():
             "classes": {"t6": floor - floor // 2, "festival": 0, "staples": 0,
                         "luxury": 0, "other": 0},
         }
+        if floors:
+            stock = floor - floor // 2
+            p["floor_classes"] = {"t6": stock // 4, "festival": 0, "staples": 0,
+                                  "luxury": 0, "other": 0}
+            p["stock_floor_structural"] = stock // 4
+            p["floor_items"] = 6
+        return p
 
     return {"points": [point("2026-08-01", 1_000_000), point("2026-08-08", 1_100_000)]}
 
@@ -100,6 +107,54 @@ def test_exposure_uses_the_bankroll_when_configured():
     assert all(r["bankroll_share"] is None for r in rows)
 
 
+def test_nav_public_carries_no_absolute_gold():
+    pub = invest.nav_public(nav_series(floors=True))
+    # A privacy regression test worth having explicitly: every published
+    # value is a date, a rebased level, a count or a ratio. Nothing on this
+    # page may carry copper.
+    for key in ("floor", "mark", "liquid", "stock_floor", "classes",
+                "floor_classes", "stock_floor_structural"):
+        assert key not in pub
+    assert pub["floor_coverage"] == 0.25
+    assert pub["floor_items"] == 6
+
+
+def test_nav_public_leaves_floor_coverage_none_on_points_stored_before_s7():
+    pub = invest.nav_public(nav_series())
+    assert pub["floor_coverage"] is None
+    assert pub["floor_items"] is None
+
+
+def test_exposure_rows_render_floor_coverage_as_a_ratio_never_a_gold_level():
+    rows = invest.exposure_rows(nav_series(floors=True), bankroll_copper=2_200_000)
+    by = {r["cls"]: r for r in rows}
+    assert by["t6"]["floor_coverage"] == 0.25
+    assert by["festival"]["floor_coverage"] is None  # never measured, not zero
+    assert all(abs(r["floor_coverage"] or 0) <= 1 for r in rows)
+
+
+def test_exposure_rows_leave_floor_coverage_none_without_the_new_keys():
+    rows = invest.exposure_rows(nav_series(), bankroll_copper=None)
+    assert all(r["floor_coverage"] is None for r in rows)
+
+
+def test_exposure_table_renders_coverage_and_the_liquidation_mark_wording():
+    payload = invest.build_payload(None, nav_series(floors=True), None)
+    html = invest.exposure_table(payload)
+    assert "Floor coverage" in html
+    assert "25.0%" in html
+    assert "n/a" in html  # a class with no computable floor
+    assert "above the liquidation mark" in html
+    assert "above the floor" not in html
+
+
+def test_coverage_cell_never_prints_a_negative_or_a_bare_zero():
+    assert invest.coverage(None) == "n/a"
+    assert invest.coverage(1.4) == "at floor"
+    assert invest.coverage(1.0) == "at floor"
+    assert invest.coverage(0.32) == "32.0%"
+
+
 def test_luxury_public_passes_through_picks_and_meta():
     pub = invest.luxury_public(luxury_doc())
     assert pub["universe_n"] == 121
@@ -122,10 +177,11 @@ def test_render_with_no_artifacts_is_a_complete_empty_state_page():
     assert "No thesis registry entries yet" in html
     assert "No release event-study artifact yet" in html
     assert "No market radar artifact yet" in html
+    assert "No corner screen artifact yet" in html
     for placeholder in ("__GENERATED__", "__META__", "__RETURNS__", "__CAPS__",
                         "__EXPOSURE__", "__CONSTITUENTS__", "__CRAFT__",
                         "__LUXURY__", "__THESIS__", "__RELEASES__", "__RADAR__",
-                        "__DATA__"):
+                        "__CORNERS__", "__DATA__"):
         assert placeholder not in html
 
 
@@ -317,3 +373,75 @@ def test_radar_table_shows_burn_in_message_below_min_obs():
     payload = invest.build_payload(None, None, None, radar_doc=radar_doc(history_days=2))
     html = invest.radar_table(payload)
     assert "Still collecting the rolling baseline" in html
+
+
+# --- corner screen ---------------------------------------------------------
+
+
+def corner_doc(picks=None, rejected=None):
+    return {
+        "generated": "2026-08-10T04:20:00Z",
+        "through": "2026-08-10",
+        "candidates": 75,
+        "recipes": 7514,
+        "picks": picks if picks is not None else [
+            {
+                "id": 901, "name": "Corner Item", "rarity": "Exotic",
+                "strategy": "corners", "sell_price": 20_000, "qty": 30,
+                "cost": 750_000, "avg_cost": 25_000, "relist_at": 59_999,
+                "ceiling": 60_000, "ceiling_source": "traded high",
+                "margin": 25_999, "mult": 2.04, "demand_per_day": 10.0,
+                "refill_per_day": 1.0, "refill_unobserved": False,
+                "race": 2.5, "score": 2.04, "unload_days": 12.0,
+                "bail_out_pct": -0.28, "unload": {"days": 12},
+            }
+        ],
+        "rejected": rejected if rejected is not None else [
+            {"id": 902, "name": "Deep Book", "reason": "book is 248 days of unload"}
+        ],
+    }
+
+
+def test_corner_table_shows_the_pick_and_its_bounding_columns():
+    payload = invest.build_payload(None, None, None, corner_doc=corner_doc())
+    html = invest.corner_table(payload)
+    assert "Corner Item" in html
+    assert "traded high" in html
+    assert "2.04" in html
+    assert "12d" in html
+    assert "per-corner cap" in html  # no bankroll figure, just the reminder
+
+
+def test_corner_table_always_lists_the_near_misses_with_their_reasons():
+    payload = invest.build_payload(None, None, None, corner_doc=corner_doc())
+    html = invest.corner_table(payload)
+    assert "Screened, not actionable (1)" in html
+    assert "book is 248 days of unload" in html
+
+
+def test_corner_table_says_an_empty_screen_is_the_normal_output():
+    payload = invest.build_payload(None, None, None, corner_doc=corner_doc(picks=[]))
+    html = invest.corner_table(payload)
+    assert "Nothing clears the screen today" in html
+    assert "Deep Book" in html  # the near-miss list is what keeps it legible
+
+
+def test_corner_section_renders_an_explicit_empty_state_without_an_artifact():
+    payload = invest.build_payload(None, None, None, corner_doc=None)
+    html = invest.corner_table(payload)
+    assert "No corner screen artifact yet" in html
+
+
+def test_corner_section_publishes_no_bankroll_derived_figure():
+    # A configured bankroll must change nothing about this section: the
+    # page carries a reminder to check the swallow cost against the reader's
+    # own cap, and never a capital figure or a within-cap flag, either of
+    # which would bracket a share of BANKROLL_G beside a public gold cost.
+    doc = corner_doc()
+    with_bankroll = invest.corner_table(
+        invest.build_payload(None, None, 50_000_000, corner_doc=doc)
+    )
+    without = invest.corner_table(invest.build_payload(None, None, None, corner_doc=doc))
+    assert with_bankroll == without
+    for key in doc["picks"][0]:
+        assert "cap" not in key and "bankroll" not in key

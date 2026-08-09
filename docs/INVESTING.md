@@ -356,20 +356,33 @@ Every material has computable bounds: a floor (vendor value, salvage
 expectation, forge-fodder demand for precursor gambling) and a ceiling
 (craft-from-inputs cost, mystic forge promotion cost, festival vendor
 rates). The preserved gw2profits dump (8,062 recipes including forge
-conversions with expected outputs) plus /v2/recipes gives us the whole
-conversion graph offline.
+conversions with expected outputs) and /v2/recipes are disjoint halves,
+not overlapping copies: every id in the archive is negative, meaning it is
+exactly the set of recipes the official API never listed (forge
+conversions, merchant exchanges, container double-clicks) and it holds zero
+crafting-discipline recipes. So "the whole conversion graph offline" needs
+both; the archive alone, which is what M6.e part 1 ships, covers the forge
+and vendor routes and not ordinary craft-from-inputs.
+
+Salvage expectation as a floor source is deferred, and named rather than
+dropped: no data for it exists in this repo. The archive's 53 Salvage rows
+are legendary precursor Experiment recipes, not gear salvage, and the
+archived API docs show `/json/v3` was gw2profits' only endpoint, so the
+published salvage rates never had a feed to preserve.
 
 Uses, in order of value:
 
 1. Risk metric: floor distance ((price - floor)/price) per held position;
    the closest thing to a hedge this market offers is holding assets that
-   sit on structural floors.
+   sit on structural floors. Reported as floor coverage (= 1 - distance,
+   measured against the price net of tax), because distance sits near 1.0
+   for almost everything and reads backwards as a risk column.
 2. Corner ceiling (S6 above).
 3. Mispricing screen: items trading above their craft ceiling (sell the
    inputs' conversion) or below their salvage floor (buy and salvage);
    T5-to-T6 promotion spreads; unidentified gear price vs its salvage
-   expectation, which is a large liquid market (rare unid gear: ~12.7k
-   g/day turnover, live).
+   expectation, which is a large liquid market (rare unid gear: ~18.7k
+   g/day turnover, remeasured 2026-08-09 at 71,480 units/day and 26s 11c).
 
 ### S8. Time-gated crafting carry
 
@@ -463,7 +476,13 @@ What it can mean, concretely:
 6. Conservative marks: NAV always values positions at dump-into-bid net of
    tax, never at ask. Optimism lives in theses, never in accounting.
 7. Structural floors: prefer positions with computable floors (S7); the
-   floor distance is reported per position and in aggregate.
+   floor distance is reported per position and in aggregate, published as
+   floor coverage (= 1 - distance) so a bigger number means better
+   protection. A preference, so it is reported and never gates a pick or
+   feeds sizing. Per-position reporting covers paper positions (M6.e,
+   `report/track.py`); real holdings surface as class aggregates plus an
+   item count, since naming held items on a public page is a separate
+   disclosure decision.
 
 ## Benchmarks and scorekeeping
 

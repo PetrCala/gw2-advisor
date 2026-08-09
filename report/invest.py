@@ -9,17 +9,28 @@ Reads the weekly index artifact (invest/bench.json.gz), the daily NAV series
 and the daily luxury desk artifact (invest/luxury/latest.json.gz), and
 renders the "are we ahead of the market" page: benchmark lines (index, raw
 gold, ecto, gem rate), the NAV line, the allocation caps, the holdings class
-breakdown, time-gated craft carry, and today's luxury desk picks
-(docs/INVESTING.md strategies S8 and S4).
+breakdown with its structural floor coverage, time-gated craft carry,
+today's luxury desk picks and the corner screen (docs/INVESTING.md
+strategies S8, S4, S7 and S6).
+
+Two words that used to mean two different things on one screen, now
+separated: the NAV valuation convention is the "liquidation mark" (its JSON
+keys stay floor/stock_floor, which the stored series depends on), and
+"structural floor" is S7's bound. "Exit floor" on site/index.html is a third
+thing again (a sizing constraint) and is untouched.
 
 Privacy rule: the NAV series is stored in the private bucket in absolute
 gold, but everything published here is rebased to 100 or expressed as a
 percentage, so the public page never carries absolute wealth. The bankroll
 (BANKROLL_G) is used only as a denominator for the same reason. The craft
 carry and luxury desk tables are an exception by design, the same way the
-flip report shows prices: cost/sell/capital there are market data and a
+flip report shows prices: cost/sell/capital there, and the corner screen's
+swallow cost, average cost, relist and ceiling, are market data and a
 recommendation, not the user's own holdings, so showing them in gold is not
-a wealth leak.
+a wealth leak. Floor coverage is the opposite case and is published as a
+unitless ratio only: this page already prints bankroll_share per class, so a
+single per-class floor in gold would give class_value = floor_gold /
+floor_coverage and from there BANKROLL_G = class_value / bankroll_share.
 """
 
 import json
@@ -31,6 +42,7 @@ from pathlib import Path
 
 from account.pnl import gold
 from invest import bankroll, tags
+from invest.corner import CORNER_KEY
 from invest.craft import CRAFT_KEY
 from invest.index import BENCH_KEY, trailing_return
 from invest.luxury import LUXURY_KEY
@@ -73,6 +85,11 @@ def nav_public(nav):
     stock = latest.get("stock_floor") or 0
     total = latest.get("floor") or 0
     classes = latest.get("classes") or {}
+    # The ratio is publishable, the denominator is not: site/invest.html
+    # already prints bankroll_share per class, so one gold figure in this
+    # payload would give class_value = floor_gold / floor_coverage and then
+    # BANKROLL_G = class_value / bankroll_share. Copper stops here.
+    structural = latest.get("stock_floor_structural")
     composition = [
         {
             "cls": cls,
@@ -96,6 +113,10 @@ def nav_public(nav):
         "mark_premium": round(latest["mark"] / latest["floor"] - 1, 4)
         if latest.get("floor")
         else None,
+        "floor_coverage": round(structural / stock, 4)
+        if structural is not None and stock
+        else None,
+        "floor_items": latest.get("floor_items"),
         "composition": composition,
         "returns": returns,
     }
@@ -108,10 +129,12 @@ def exposure_rows(nav, bankroll_copper):
         return []
     latest = points[-1]
     classes = latest.get("classes") or {}
+    floor_classes = latest.get("floor_classes") or {}
     stock = latest.get("stock_floor") or 0
     rows = []
     for cls in tags.CLASSES:
         v = classes.get(cls, 0)
+        f = floor_classes.get(cls)
         rows.append(
             {
                 "cls": cls,
@@ -120,6 +143,10 @@ def exposure_rows(nav, bankroll_copper):
                 "bankroll_share": round(v / bankroll_copper, 4)
                 if bankroll_copper
                 else None,
+                # A ratio and never a level, for the reason nav_public
+                # states: two ratios over one class carry no scale, one
+                # gold figure would unmask the bankroll.
+                "floor_coverage": round(f / v, 4) if f is not None and v else None,
             }
         )
     return rows
@@ -180,7 +207,7 @@ def release_public(doc):
 
 
 def build_payload(bench, nav, bankroll_copper, craft_series=None, luxury_doc=None,
-                   theses=None, releases_doc=None, radar_doc=None):
+                   theses=None, releases_doc=None, radar_doc=None, corner_doc=None):
     nav_pub = nav_public(nav)
     return {
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -207,6 +234,7 @@ def build_payload(bench, nav, bankroll_copper, craft_series=None, luxury_doc=Non
         "theses": theses or [],
         "releases": release_public(releases_doc),
         "radar": radar_doc,
+        "corner": corner_doc,
     }
 
 
@@ -267,6 +295,17 @@ def caps_table(payload):
     )
 
 
+def coverage(v):
+    """Floor coverage as a cell: "n/a" when nothing was computable, "at
+    floor" once the structural floor reaches the liquidation mark, a
+    percentage otherwise. Never a negative percentage, and never 0% for a
+    class whose floor was simply never measurable (luxury genuinely has
+    none), which is what separates "unmeasured" from "measured and bad"."""
+    if v is None:
+        return "n/a"
+    return "at floor" if v >= 1 else share(v)
+
+
 def exposure_table(payload):
     rows = payload["exposure"]
     if not rows:
@@ -276,8 +315,9 @@ def exposure_table(payload):
             "daily report starts appending one point per day.</p>"
         )
     cells = "".join(
-        "<tr><td>{}</td><td>{}</td><td>{}</td></tr>".format(
-            escape(r["label"]), share(r["stock_share"]), share(r["bankroll_share"])
+        "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+            escape(r["label"]), share(r["stock_share"]), share(r["bankroll_share"]),
+            coverage(r.get("floor_coverage")),
         )
         for r in rows
     )
@@ -289,10 +329,18 @@ def exposure_table(payload):
         if nav.get("items") is not None:
             meta.append(f"{nav['items']:,} distinct items held")
         if nav.get("mark_premium") is not None:
-            meta.append(f"patient mark {pct(nav['mark_premium'])} above the floor")
+            meta.append(f"patient mark {pct(nav['mark_premium'])} above the liquidation mark")
+        if nav.get("floor_coverage") is not None:
+            items = nav.get("floor_items")
+            tail = f" across {items:,} items" if items else ""
+            meta.append(
+                f"structural floors underwrite {coverage(nav['floor_coverage'])} "
+                f"of stock{tail}"
+            )
     return (
         "<table><thead><tr><th>Class</th><th>Share of stock</th>"
-        f"<th>Share of bankroll</th></tr></thead><tbody>{cells}</tbody></table>"
+        "<th>Share of bankroll</th><th>Floor coverage</th></tr></thead>"
+        f"<tbody>{cells}</tbody></table>"
         + (f"<p>{escape('; '.join(meta))}.</p>" if meta else "")
     )
 
@@ -524,6 +572,65 @@ def radar_table(payload):
     return abnormal_html + pump_html + sink_html
 
 
+def corner_table(payload):
+    doc = payload.get("corner")
+    if not doc:
+        return (
+            "<p>No corner screen artifact yet; the daily invest.corner step "
+            "fills this in.</p>"
+        )
+    picks = doc.get("picks") or []
+    rejected = doc.get("rejected") or []
+    meta = (
+        f"{doc.get('candidates', 0):,} rows survived the free prefilter and had "
+        f"their real ladder walked against a ceiling, as of "
+        f"{doc.get('through', '?')}; {len(picks)} are actionable."
+    )
+    if picks:
+        cells = "".join(
+            "<tr><td><a href=\"https://www.gw2bltc.com/en/item/{}\">{}</a></td>"
+            "<td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>"
+            "<td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+                p["id"], escape(p["name"]), gold(p["cost"]), gold(p["avg_cost"]),
+                gold(p["relist_at"]), gold(p["ceiling"]), escape(p["ceiling_source"]),
+                f"{p['mult']:.2f}x", f"{p['demand_per_day']:g}",
+                f"{p['refill_per_day']:g}" + ("*" if p.get("refill_unobserved") else ""),
+                f"{p['race']:.2f}", f"{p['score']:.2f}",
+                f"{p['unload_days']:.0f}d", pct(p.get("bail_out_pct")),
+            )
+            for p in picks
+        )
+        table = (
+            "<table><thead><tr><th>Item</th><th>Swallow cost</th><th>Avg cost</th>"
+            "<th>Relist</th><th>Ceiling</th><th>Ceiling from</th><th>Multiple</th>"
+            "<th>Demand/day</th><th>Refill/day</th><th>Race</th><th>Score</th>"
+            f"<th>Unload</th><th>Bail-out</th></tr></thead><tbody>{cells}</tbody></table>"
+            "<p>Check the swallow cost against your own per-corner cap before "
+            "any gold moves; this table deliberately carries no bankroll-derived "
+            "figure. A refill rate marked * was never observed, so it sits at the "
+            "floor the window could measure rather than at zero.</p>"
+        )
+    else:
+        table = (
+            "<p>Nothing clears the screen today. An empty table is the normal "
+            "output: at the strict ceiling almost everything fails on the "
+            "unload horizon or on ceiling headroom, and the near-miss list "
+            "below is what makes that legible.</p>"
+        )
+    if rejected:
+        items = "".join(
+            '<li><a href="https://www.gw2bltc.com/en/item/{}">{}</a>: {}</li>'.format(
+                r["id"], escape(r["name"]), escape(r["reason"])
+            )
+            for r in rejected[:40]
+        )
+        table += (
+            f"<h3>Screened, not actionable ({len(rejected)})</h3>"
+            f"<ul class=\"rejects\">{items}</ul>"
+        )
+    return f"<p>{escape(meta)}</p>{table}"
+
+
 def render(payload):
     bench = payload.get("bench")
     if bench and bench.get("index"):
@@ -547,6 +654,7 @@ def render(payload):
     html = html.replace("__THESIS__", thesis_table(payload))
     html = html.replace("__RELEASES__", release_table(payload))
     html = html.replace("__RADAR__", radar_table(payload))
+    html = html.replace("__CORNERS__", corner_table(payload))
     # </ would end the script block early if an item name ever carried it
     html = html.replace("__DATA__", json.dumps(payload).replace("</", "<\\/"))
     return html
@@ -565,6 +673,7 @@ def _read_actions_theses():
 def main():
     local = "--local" in sys.argv
     bench = nav = craft_series = luxury_doc = releases_doc = radar_doc = None
+    corner_doc = None
     if not local:
         from collector.s3store import Store
 
@@ -575,11 +684,12 @@ def main():
         luxury_doc = store.get_json_gz(LUXURY_KEY)
         releases_doc = store.get_json_gz(RELEASES_KEY)
         radar_doc = store.get_json_gz(RADAR_KEY)
+        corner_doc = store.get_json_gz(CORNER_KEY)
 
     theses = _read_actions_theses()
     payload = build_payload(
         bench, nav, bankroll.bankroll_copper(), craft_series, luxury_doc,
-        theses, releases_doc, radar_doc,
+        theses, releases_doc, radar_doc, corner_doc,
     )
     SITE.mkdir(exist_ok=True)
     (SITE / "invest.json").write_text(json.dumps(payload, indent=1), encoding="utf-8")
@@ -591,7 +701,8 @@ def main():
         f"luxury picks: {len((luxury_doc or {}).get('picks') or [])}, "
         f"theses: {len(theses)}, "
         f"releases: {'yes' if releases_doc else 'no'}, "
-        f"radar: {'yes' if radar_doc else 'no'}) "
+        f"radar: {'yes' if radar_doc else 'no'}, "
+        f"corner picks: {len((corner_doc or {}).get('picks') or [])}) "
         f"-> {SITE / 'invest.html'}"
     )
 
@@ -634,6 +745,8 @@ svg .grid { stroke: #2a2e38; stroke-width: 1; }
 .carry-live { color: #7ec97f; } .carry-dead { color: #8a8f9c; } .carry-na { color: #8a8f9c; }
 .notes { color: #8a8f9c; font-size: 13px; margin-top: 24px; }
 .notes ul { margin: 6px 0; padding-left: 20px; }
+ul.rejects { color: #8a8f9c; font-size: 13px; margin: 6px 0; padding-left: 20px; }
+ul.rejects a { color: #aab0bd; }
 </style>
 </head>
 <body>
@@ -694,6 +807,22 @@ a sink-anticipation watchlist. The z-score screens have a real burn-in
 period (about 90 days) before the baseline is trustworthy; the sink
 watchlist needs no history and is live from day one.</p>
 __RADAR__
+<h2>Corners and buyouts</h2>
+<p>Strategy S6: buy a thin sell book out to a price and relist above it. The
+score is the smaller of two ratios, both breaking even at 1.00: the race
+(how much faster our own capture share of demand unloads the lot than new
+listings refill the book) and the ceiling multiple (the relist net of the
+15% cut over what the lot cost). The relist can never exceed the cheapest
+alternative route to the item, which is a recipe or vendor conversion where
+one exists and the 12-month traded high otherwise, so a plan is never built
+on the fantasy asks resting at the top of a thin ladder.</p>
+<p><strong>The largest risk here is one this model cannot measure at all:
+every plan assumes today's demand survives at the raised price. It will not,
+and nothing in the data says by how much.</strong> Nor can the data separate
+end demand from other flippers buying to relist, so cornering into flipper
+demand is cornering into your own future competition. Treat a passing score
+as a candidate for a human to underwrite, never as a decision.</p>
+__CORNERS__
 __CONSTITUENTS__
 <div class="notes">
 <ul>
@@ -701,10 +830,29 @@ __CONSTITUENTS__
 turnover, reweighted monthly, single item capped at 5%; levels chain daily
 from item mid prices, renormalized over what actually traded. It starts
 mid-2019 because the mirror carries no fills before then.</li>
-<li>NAV marks every holding at a dump into the current best bid, net of
-the 15% cut; the sell-listing mark is shown only as a premium. Absolute
-gold never appears here: the NAV line is rebased to 100 and shares are
-percentages.</li>
+<li>NAV marks every holding at its liquidation value (a dump into the
+current best bid, net of the 15% cut); the sell-listing mark is shown only
+as a premium. Absolute gold never appears here: the NAV line is rebased to
+100 and shares are percentages.</li>
+<li>Floor coverage is the share of a class's liquidation mark underwritten
+by a structural floor (strategy S7): the vendor buy-back price, or the most
+any conversion that consumes the item could afford to pay for it as fodder,
+whichever is higher. It is reported, never a filter: risk rule 7 says
+"prefer positions with computable floors", which is a preference, so nothing
+here gates a pick or shrinks a lot. "n/a" means no floor was computable for
+that class at all, which is different from a floor of zero. The series
+cannot be backfilled (no record of past holdings or past vendor values
+exists), so it starts from today.</li>
+<li>The corner ceiling is the cheapest alternative route to one unit:
+ingredients at the queue front, account-bound catalysts costed at zero and a
+random-output recipe taken at its maximum yield, so the ceiling comes out as
+low as it defensibly can. Ceiling from tells you whether that moat is
+structural (forge, merchant, double-click) or only historical (traded high),
+which matters because ceilings move: the 2016-17 hardened leather squeeze
+ended when ArenaNet shipped a leather farm. Bail-out is an estimate of
+dumping the whole lot into today's buy book, shown because a thin buy book
+is what makes a corner possible in the first place; it is not a floor and
+another trader's wall is not your exit liquidity.</li>
 <li>The gem line is the cost of buying 100 gems with gold (gw2tp history
 plus the official exchange spot). It is the closest thing to an outside
 inflation gauge, not a tradable series: the round trip loses ~35%.</li>

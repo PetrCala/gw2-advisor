@@ -28,6 +28,13 @@ The simulation, stated plainly:
   book, so a position that goes stale past invest.luxury.PATIENCE_DAYS is
   flagged (went_stale) rather than actually repriced mid-simulation; the
   live reprice happens in invest.luxury.build_picks at collection time.
+- A corner pick (docs/INVESTING.md, S6) fills its whole lot at open at the
+  ladder VWAP the screen computed, then the exit is simulated day by day:
+  we sell our planned share of demand on days nobody has undercut our
+  relist, and abort once accumulated new listings pass the schedule's
+  tripwire. The entry is not simulated because a sweep is one instant
+  action against a book that was really observed, and the daily snapshot
+  carries no ladder to model it against.
 
 Every opened position carries a "strategy" tag (docs/INVESTING.md,
 benchmarks: "every recommendation the long book emits ... with the strategy
@@ -69,7 +76,8 @@ from html import escape
 from pathlib import Path
 from statistics import median
 
-from invest import luxury, risk
+from invest import bounds, corner, luxury, risk
+from invest.corner import CORNER_KEY
 from invest.craft import CRAFT_KEY
 from invest.luxury import LUXURY_KEY
 from invest.thesis import THESIS_HORIZON_DAYS
@@ -82,11 +90,16 @@ CLOSED_KEY = "track/closed.json.gz"
 
 TAX = flip.TAX
 CAPTURE = flip.CAPTURE  # the assumption under test, read from the scorer itself
+# Same number, different meaning: in a corner we are the only seller by
+# construction, so this is a demand haircut for the raised price rather
+# than a share of contested flow. Read from the screen that sized the lot.
+CORNER_UNLOAD_SHARE = corner.UNLOAD_SHARE
 
 FLIP_HORIZON_DAYS = 7  # a 2-day predicted round trip gets a week to happen
 SEASON_HORIZON_DAYS = 400  # one full cycle plus slack, then mark it out
 CRAFT_HORIZON_DAYS = 7  # matches S8's "sell weekly" cadence
 LUXURY_HORIZON_DAYS = 70  # entry patience (21d) + exit sizing horizon (30d) + slack
+CORNER_HORIZON_DAYS = 120  # the 90-day unload horizon plus slack, same construction as luxury's
 FLIP_PER_DAY = flip.TOP_N  # the picks as published, no wider
 LUXURY_PER_DAY = 20  # S4 sizing: 10-20 items concurrently
 OPEN_CAP = 800  # backstop on state size; the horizons bound it well below this
@@ -100,6 +113,7 @@ STRATEGY = {
     "craft": "time-gated crafting",
     "luxury": "luxury desk",
     "thesis": "thesis registry",
+    "corner": "corners",
 }
 
 # Open positions carry running aggregates, so a field added later would make
@@ -283,7 +297,84 @@ def open_thesis(row, today):
     }
 
 
+def open_corner(pick, today):
+    """A corner screen pick (invest.corner.build_picks) as a paper position.
+
+    The whole lot is filled at open, at the ladder VWAP the screen computed
+    off a book that was really observed. A sweep is one instant action
+    against that ladder, and the daily snapshot row carries no ladder to
+    simulate it against, so inventing a fill mechanic out of an aggregate
+    sell_quantity would add fake precision to the one leg that is not in
+    doubt. The exit is where the fidelity belongs, and that is what
+    tick_corner models.
+    """
+    unload = pick.get("unload") or {}
+    return {
+        "v": SCHEMA,
+        "kind": "corner",
+        "strategy": STRATEGY["corner"],
+        "id": pick["id"],
+        "name": pick.get("name") or f"item {pick['id']}",
+        "rarity": pick.get("rarity") or "",
+        "opened": today.isoformat(),
+        "qty": pick["qty"],
+        "avg_cost": pick["avg_cost"],
+        "relist_at": pick["relist_at"],
+        "ceiling": pick["ceiling"],
+        "ceiling_source": pick.get("ceiling_source") or "",
+        "margin": pick["margin"],
+        "unload_per_day": unload.get("per_day") or 0.0,
+        "planned_days": unload.get("days"),
+        "abort_qty": unload.get("abort_qty") or 0,
+        "entry_modeled": "ladder VWAP at open",
+        "days": 0,
+        "spent": float(pick["qty"] * pick["avg_cost"]),
+        "sold": 0.0,
+        "revenue": 0.0,
+        "held_top_days": 0,
+        "undercut_days": 0,
+        "resupply": 0.0,
+        "aborted": False,
+        "last_bid": None,
+        "last_ask": None,
+        "last_tick": None,
+    }
+
+
 # --- daily observation ---------------------------------------------------
+
+
+def tick_corner(pos, row, today):
+    """Advance one corner by a day: did we still own the top of the book?
+
+    On a day the best ask is at or above our relist, nobody has undercut us,
+    so we sell our own planned share of that day's demand at the relist net
+    of tax. On a day it is below, we sell nothing and the day is counted as
+    undercut. New sell listings accumulate as re-supply; once they pass the
+    schedule's abort tripwire with units still unsold, the moat is gone and
+    the remainder is dumped. That is the 2016 ToT-bag festival re-supply and
+    the 2016-17 leather-farm patch, measured rather than described.
+    """
+    bid, ask = row.get("buy_price"), row.get("sell_price")
+    pos["days"] += 1
+    if bid:
+        pos["last_bid"] = bid
+    if ask:
+        pos["last_ask"] = ask
+    pos["resupply"] += _f(row.get("1d_sell_listed"))
+
+    left = pos["qty"] - pos["sold"]
+    if left <= EPS:
+        return
+    if ask and ask >= pos["relist_at"]:
+        pos["held_top_days"] += 1
+        units = min(left, CORNER_UNLOAD_SHARE * _f(row.get("1d_sell_sold")))
+        pos["sold"] += units
+        pos["revenue"] += units * pos["relist_at"] * (1 - TAX)
+    elif ask:
+        pos["undercut_days"] += 1
+    if pos["abort_qty"] and pos["resupply"] >= pos["abort_qty"] and pos["qty"] - pos["sold"] > EPS:
+        pos["aborted"] = True
 
 
 def tick_flip(pos, row, today):
@@ -429,7 +520,7 @@ def tick_thesis(pos, row, today):
 
 TICKS = {
     "flip": tick_flip, "season": tick_season, "craft": tick_craft,
-    "luxury": tick_luxury, "thesis": tick_thesis,
+    "luxury": tick_luxury, "thesis": tick_thesis, "corner": tick_corner,
 }
 
 
@@ -444,7 +535,8 @@ def is_done(pos, today):
     target hit, the registry's own invalidation date, a human status:
     closed override (checked first: it is how the human records that the
     real in-game decision is already made), or the safety-net horizon,
-    whichever comes first."""
+    whichever comes first; a corner when the lot is gone, when re-supply
+    tripped the abort, or at its own longer horizon."""
     iso = today.isoformat()
     age = _days(pos["opened"], today)
     if pos["kind"] == "flip":
@@ -453,6 +545,10 @@ def is_done(pos, today):
         return age >= CRAFT_HORIZON_DAYS
     if pos["kind"] == "luxury":
         return pos["sold"] >= pos["qty"] - EPS or age >= LUXURY_HORIZON_DAYS
+    if pos["kind"] == "corner":
+        if pos.get("aborted"):
+            return True
+        return pos["sold"] >= pos["qty"] - EPS or age >= CORNER_HORIZON_DAYS
     if pos["kind"] == "thesis":
         if pos.get("closed_by_human"):
             return True
@@ -661,16 +757,64 @@ def close_thesis(pos, today):
     }
 
 
+def close_corner(pos, today):
+    """Book the corner: the exit is the scoreboard, so the outcome
+    vocabulary names how the exit went (unloaded / partial / undercut /
+    resupplied / horizon_expired) rather than whether a round trip
+    completed. Unsold units are marked at the last bid net of fees, exactly
+    like close_flip."""
+    held = max(0.0, pos["qty"] - pos["sold"])
+    mark = pos["last_bid"] or pos["avg_cost"]
+    residual = held * mark * (1 - TAX)
+    net = pos["revenue"] + residual - pos["spent"]
+    pred_net = pos["margin"] * pos["qty"]
+    if pos["sold"] >= pos["qty"] - EPS:
+        outcome = "unloaded"
+    elif pos.get("aborted"):
+        outcome = "resupplied"
+    elif not pos["held_top_days"]:
+        outcome = "undercut"
+    elif pos["sold"] > EPS:
+        outcome = "partial"
+    else:
+        outcome = "horizon_expired"
+    return {
+        "kind": "corner",
+        "strategy": pos.get("strategy", STRATEGY["corner"]),
+        "id": pos["id"],
+        "name": pos["name"],
+        "rarity": pos["rarity"],
+        "opened": pos["opened"],
+        "closed": today.isoformat(),
+        "outcome": outcome,
+        "qty": pos["qty"],
+        "sold": round(pos["sold"], 1),
+        "days": pos["days"],
+        "held_top_days": pos["held_top_days"],
+        "undercut_days": pos["undercut_days"],
+        "planned_days": pos["planned_days"],
+        "resupply": round(pos["resupply"], 1),
+        "abort_qty": pos["abort_qty"],
+        "ceiling_source": pos["ceiling_source"],
+        "spent": round(pos["spent"], 1),
+        "revenue": round(pos["revenue"], 1),
+        "pred_net": round(pred_net, 1),
+        "net": round(net, 1),
+        "net_pct": round(net / pred_net, 3) if pred_net > 0 else None,
+    }
+
+
 CLOSERS = {
     "flip": close_flip, "season": close_season, "craft": close_craft,
-    "luxury": close_luxury, "thesis": close_thesis,
+    "luxury": close_luxury, "thesis": close_thesis, "corner": close_corner,
 }
 
 
 # --- the daily roll ------------------------------------------------------
 
 
-def roll(state, picks, queue, by_id, today, crafts=(), luxury_picks=(), theses=()):
+def roll(state, picks, queue, by_id, today, crafts=(), luxury_picks=(), theses=(),
+         corner_picks=()):
     """One day of tracking: observe, resolve, then open today's picks.
 
     Positions are keyed by (kind, item): an item already being tracked is
@@ -684,6 +828,10 @@ def roll(state, picks, queue, by_id, today, crafts=(), luxury_picks=(), theses=(
     output (every bucket, not just active): thesis positions tick against
     by_id via their own item id, and a status: closed override in the
     live registry marks the matching open position for immediate closure.
+    corner_picks is invest.corner.build_picks' actionable output; at most
+    invest.corner.MAX_CONCURRENT_CORNERS are open at any time, because a
+    corner ties its whole lot up for months rather than recycling capital
+    the way a flip does.
     """
     iso = today.isoformat()
     positions = [p for p in (state.get("positions") or []) if p.get("v") == SCHEMA]
@@ -748,6 +896,16 @@ def roll(state, picks, queue, by_id, today, crafts=(), luxury_picks=(), theses=(
         live.append(open_thesis(t, today))
         keys.add(("thesis", t["key"]))
         opened += 1
+    room = corner.MAX_CONCURRENT_CORNERS - sum(1 for p in live if p["kind"] == "corner")
+    for p in corner_picks:
+        if room <= 0:
+            break
+        if p.get("score", 0) < corner.MIN_SCORE or ("corner", p["id"]) in keys:
+            continue
+        live.append(open_corner(p, today))
+        keys.add(("corner", p["id"]))
+        opened += 1
+        room -= 1
 
     dropped = max(0, len(live) - OPEN_CAP)
     return (
@@ -770,6 +928,7 @@ def summarize(state):
     crafts = [r for r in records if r["kind"] == "craft"]
     luxuries = [r for r in records if r["kind"] == "luxury"]
     theses = [r for r in records if r["kind"] == "thesis"]
+    corners = [r for r in records if r["kind"] == "corner"]
     n = len(flips)
     completed = [r for r in flips if r["outcome"] == "closed"]
     scored = [r for r in seasons if r["outcome"] == "closed" and r["ret"] is not None]
@@ -780,6 +939,12 @@ def summarize(state):
     craft_spent = sum(r["spent"] for r in crafts)
     lux_pred_net = sum(r["pred_net"] for r in luxuries)
     thesis_pred_net = sum(r["pred_net"] for r in theses)
+    corner_spent = sum(r["spent"] for r in corners)
+    # The design doc says the exit is the binding constraint, so the corner
+    # scoreboard leads with the exit: days spent owning the top of the book
+    # against the days the unload schedule planned for, and the share of
+    # positions that ended with the moat gone. Net gold is secondary.
+    exit_broken = sum(1 for r in corners if r["outcome"] in ("undercut", "resupplied"))
     return {
         "since": state.get("since"),
         "open": {
@@ -788,6 +953,7 @@ def summarize(state):
             "craft": sum(1 for p in positions if p["kind"] == "craft"),
             "luxury": sum(1 for p in positions if p["kind"] == "luxury"),
             "thesis": sum(1 for p in positions if p["kind"] == "thesis"),
+            "corner": sum(1 for p in positions if p["kind"] == "corner"),
         },
         "flip": {
             "n": n,
@@ -850,6 +1016,21 @@ def summarize(state):
             if thesis_pred_net > 0
             else None,
             "med_net_pct": _med([r["net_pct"] for r in theses]),
+        },
+        "corner": {
+            "n": len(corners),
+            "unloaded": sum(1 for r in corners if r["outcome"] == "unloaded"),
+            "partial": sum(1 for r in corners if r["outcome"] == "partial"),
+            "undercut": sum(1 for r in corners if r["outcome"] == "undercut"),
+            "resupplied": sum(1 for r in corners if r["outcome"] == "resupplied"),
+            "exit_broken_pct": round(exit_broken / len(corners), 3) if corners else None,
+            "med_top_days": _med([r["held_top_days"] for r in corners]),
+            "med_planned_days": _med([r["planned_days"] for r in corners]),
+            "net": round(sum(r["net"] for r in corners)),
+            "net_pct": round(sum(r["net"] for r in corners) / corner_spent, 3)
+            if corner_spent > 0
+            else None,
+            "med_net_pct": _med([r["net_pct"] for r in corners]),
         },
     }
 
@@ -956,6 +1137,34 @@ def flip_rows(records):
     return out
 
 
+def _floor_flag(item_id, by_id, graph=None, prices=None):
+    """"62% vendor" / "at floor vendor" for a position sitting near a
+    computable structural floor (docs/INVESTING.md risk rule 7, S7), or ""
+    when there is no item id, no snapshot row for it, or no floor at all.
+
+    Recomputed fresh at render time and never stored, exactly like
+    _launch_flag below, so SCHEMA stays put and no stored position is
+    invalidated by this column arriving.
+
+    Only the vendor leg is wired here: it is free (vendor_value already
+    rides in the default snapshot fields), while the conversion leg needs a
+    price map this module does not fetch. graph/prices are accepted so a
+    caller that has both can pass them without another signature change.
+    """
+    if item_id is None or not by_id:
+        return ""
+    row = by_id.get(item_id)
+    if not row:
+        return ""
+    out = bounds.structural_floor(item_id, row, prices or {}, graph)
+    coverage, source = out["coverage"], out["source"]
+    if coverage is None:
+        return ""
+    if coverage >= 1:
+        return f"at floor {source}"
+    return f"{coverage:.0%} {source}"
+
+
 def _launch_flag(item_id, today):
     """"Name in Nd" for a farmable position approaching an expansion
     launch, computed fresh at render time (never stored, like every other
@@ -970,7 +1179,7 @@ def _launch_flag(item_id, today):
     return f"{label} in {days_until}d"
 
 
-def season_open_rows(positions, today):
+def season_open_rows(positions, today, by_id=None):
     out = []
     for p in positions:
         if p["kind"] != "season":
@@ -992,6 +1201,7 @@ def season_open_rows(positions, today):
                 f"{p['sell_opens']} to {p['sell_closes']}",
                 pct(p["pred_ret"]),
                 _launch_flag(p["id"], today),
+                _floor_flag(p["id"], by_id),
             )
         )
     return out[:TABLE_ROWS]
@@ -1030,7 +1240,7 @@ def _craft_link(r):
     )
 
 
-def craft_open_rows(positions, today):
+def craft_open_rows(positions, today, by_id=None):
     out = []
     for p in positions:
         if p["kind"] != "craft":
@@ -1044,6 +1254,7 @@ def craft_open_rows(positions, today):
                 money(p["revenue"]),
                 pct(p["last_spread"], 1),
                 _launch_flag(p.get("output_id"), today),
+                _floor_flag(p.get("output_id"), by_id),
             )
         )
     return out[:TABLE_ROWS]
@@ -1104,7 +1315,7 @@ def luxury_scoreboard_html(s):
     return f'<table class="score"><tbody>{body}</tbody></table>'
 
 
-def luxury_open_rows(positions, today):
+def luxury_open_rows(positions, today, by_id=None):
     out = []
     for p in positions:
         if p["kind"] != "luxury":
@@ -1122,6 +1333,7 @@ def luxury_open_rows(positions, today):
                 f"{p['days']}d",
                 "stale" if p["went_stale"] else "",
                 _launch_flag(p["id"], today),
+                _floor_flag(p["id"], by_id),
             )
         )
     return out[:TABLE_ROWS]
@@ -1158,7 +1370,7 @@ def _thesis_link(p):
     )
 
 
-def thesis_open_rows(positions, today):
+def thesis_open_rows(positions, today, by_id=None):
     out = []
     for p in positions:
         if p["kind"] != "thesis":
@@ -1175,6 +1387,7 @@ def thesis_open_rows(positions, today):
                 money(p["last_ask"]) if p["last_ask"] else "",
                 f"{p['days']}d",
                 _launch_flag(p["item_id"], today),
+                _floor_flag(p["item_id"], by_id),
             )
         )
     return out[:TABLE_ROWS]
@@ -1203,7 +1416,59 @@ def thesis_rows(records):
     return out
 
 
-def render(state, summary, generated):
+def corner_open_rows(positions, today, by_id=None):
+    out = []
+    for p in positions:
+        if p["kind"] != "corner":
+            continue
+        planned = f"{p['planned_days']}d" if p.get("planned_days") else ""
+        out.append(
+            (
+                _item_link(p),
+                p["opened"],
+                f"{p['sold']:,.0f} / {p['qty']:,}",
+                money(p["avg_cost"]),
+                money(p["relist_at"]),
+                escape(p["ceiling_source"]),
+                f"{p['held_top_days']} / {p['days']}",
+                f"{p['undercut_days']}",
+                f"{p['resupply']:,.0f} / {p['abort_qty']:,}",
+                planned,
+                _launch_flag(p["id"], today),
+                _floor_flag(p["id"], by_id),
+            )
+        )
+    return out[:TABLE_ROWS]
+
+
+def corner_rows(records):
+    out = []
+    for r in reversed(records):
+        if r["kind"] != "corner":
+            continue
+        out.append(
+            (
+                _item_link(r),
+                r["opened"],
+                r["closed"],
+                f'<span class="o-{r["outcome"]}">{r["outcome"]}</span>',
+                f"{r['sold']:,.0f} / {r['qty']:,}",
+                f"{r['held_top_days']} / {r['days']}",
+                f"{r['resupply']:,.0f} / {r['abort_qty']:,}",
+                money(r["net"]),
+                money(r["pred_net"]),
+                pct(r["net_pct"]),
+            )
+        )
+        if len(out) >= TABLE_ROWS:
+            break
+    return out
+
+
+def render(state, summary, generated, by_id=None):
+    """The page. by_id is the day's dw2 snapshot keyed by item id, used only
+    for the recomputed-at-render Floor column; absent, that column renders
+    empty rather than the build failing."""
     o = summary["open"]
     today = datetime.now(timezone.utc).date()
     html = TEMPLATE
@@ -1212,7 +1477,8 @@ def render(state, summary, generated):
     html = html.replace(
         "__OPEN__",
         f"{o['flip']} flip, {o['season']} seasonal, {o['craft']} craft-carry, "
-        f"{o['luxury']} luxury desk, {o['thesis']} thesis positions open",
+        f"{o['luxury']} luxury desk, {o['thesis']} thesis, "
+        f"{o['corner']} corner positions open",
     )
     html = html.replace("__SCORE__", scoreboard_html(summary))
     html = html.replace(
@@ -1243,9 +1509,9 @@ def render(state, summary, generated):
         [
             "Item", "Event", "Opened", "Bought", "Avg cost", "Now",
             "Pay up to", "Unrealized", "Sell window", "Predicted ret",
-            "Launch risk",
+            "Launch risk", "Floor",
         ],
-        season_open_rows(state["positions"], today),
+        season_open_rows(state["positions"], today, by_id),
     )
     html = html.replace(
         "__SEASON_OPEN__", open_holds or "<p>No hold is open right now.</p>"
@@ -1274,8 +1540,9 @@ def render(state, summary, generated):
         )
     html = html.replace("__CRAFT_META__", chead)
     craft_open = _table(
-        ["Refinement", "Opened", "Crafted", "Spent", "Revenue", "Spread", "Launch risk"],
-        craft_open_rows(state["positions"], today),
+        ["Refinement", "Opened", "Crafted", "Spent", "Revenue", "Spread",
+         "Launch risk", "Floor"],
+        craft_open_rows(state["positions"], today, by_id),
     )
     html = html.replace(
         "__CRAFT_OPEN__", craft_open or "<p>No craft carry is open right now.</p>"
@@ -1293,9 +1560,9 @@ def render(state, summary, generated):
     open_luxury_positions = _table(
         [
             "Item", "Opened", "Bought", "Sold", "Bid at", "Ask at",
-            "Bid now", "Ask now", "Age", "Patience", "Launch risk",
+            "Bid now", "Ask now", "Age", "Patience", "Launch risk", "Floor",
         ],
-        luxury_open_rows(state["positions"], today),
+        luxury_open_rows(state["positions"], today, by_id),
     )
     html = html.replace(
         "__LUXURY_OPEN__",
@@ -1331,9 +1598,9 @@ def render(state, summary, generated):
     thesis_open = _table(
         [
             "Item", "Opened", "Bought", "Sold", "Ceiling", "Target",
-            "Bid now", "Ask now", "Age", "Launch risk",
+            "Bid now", "Ask now", "Age", "Launch risk", "Floor",
         ],
-        thesis_open_rows(state["positions"], today),
+        thesis_open_rows(state["positions"], today, by_id),
     )
     html = html.replace(
         "__THESIS_OPEN__", thesis_open or "<p>No thesis position is open right now.</p>"
@@ -1350,6 +1617,41 @@ def render(state, summary, generated):
         f"<h3>Resolved positions</h3>{closed_thesis_positions}"
         if closed_thesis_positions
         else "",
+    )
+    k = summary["corner"]
+    if k["n"]:
+        khead = (
+            f"{k['n']} resolved corner(s), {k['unloaded']} fully unloaded, "
+            f"median {k['med_top_days']:.0f} day(s) owning the top of the book "
+            f"against {k['med_planned_days']:.0f} planned, "
+            f"{pct(k['exit_broken_pct'])} ended undercut or resupplied, "
+            f"net {money(k['net'])}"
+        )
+    else:
+        khead = (
+            "No corner has resolved yet; one resolves when the lot is gone, "
+            "when new listings pass the abort tripwire, or after "
+            f"{CORNER_HORIZON_DAYS} days, whichever comes first."
+        )
+    html = html.replace("__CORNER_META__", khead)
+    corner_open = _table(
+        [
+            "Item", "Opened", "Sold", "Avg cost", "Relist", "Ceiling from",
+            "Top d", "Undercut d", "Resupply", "Planned", "Launch risk", "Floor",
+        ],
+        corner_open_rows(state["positions"], today, by_id),
+    )
+    html = html.replace(
+        "__CORNER_OPEN__", corner_open or "<p>No corner is open right now.</p>"
+    )
+    corner_closed = _table(
+        ["Item", "Opened", "Closed", "Outcome", "Sold", "Top d", "Resupply",
+         "Net", "Predicted net", "Realized"],
+        corner_rows(state["records"]),
+    )
+    html = html.replace(
+        "__CORNER_CLOSED__",
+        f"<h3>Resolved corners</h3>{corner_closed}" if corner_closed else "",
     )
     return html
 
@@ -1381,13 +1683,17 @@ def main(store=None, snapshot=None, today=None):
     if snapshot is None:
         from collector import dw2
 
-        snapshot = dw2.fetch_snapshot()
+        # Widened to the corner screen's own field list: same endpoint, no
+        # extra request, and it brings 1d_sell_listed so tick_corner can
+        # measure re-supply. Additive for the other five kinds.
+        snapshot = dw2.fetch_snapshot(fields=corner._corner_fields(dw2))
     by_id = {it["id"]: it for it in snapshot if it.get("id") is not None}
     today = today or datetime.now(timezone.utc).date()
 
     craft_points = (store.get_json_gz(CRAFT_KEY) or {}).get("points") or []
     crafts = craft_points[-1]["chains"] if craft_points else []
     luxury_picks = (store.get_json_gz(LUXURY_KEY) or {}).get("picks") or []
+    corner_picks = (store.get_json_gz(CORNER_KEY) or {}).get("picks") or []
 
     state = {
         "since": None,
@@ -1402,7 +1708,9 @@ def main(store=None, snapshot=None, today=None):
     if prev_closed:
         state["records"] = prev_closed.get("records") or []
 
-    state, stats = roll(state, picks, queue, by_id, today, crafts, luxury_picks, theses)
+    state, stats = roll(
+        state, picks, queue, by_id, today, crafts, luxury_picks, theses, corner_picks
+    )
     summary = summarize(state)
 
     store.put_json_gz(
@@ -1424,7 +1732,9 @@ def main(store=None, snapshot=None, today=None):
         ),
         encoding="utf-8",
     )
-    (SITE / "track.html").write_text(render(state, summary, generated), encoding="utf-8")
+    (SITE / "track.html").write_text(
+        render(state, summary, generated, by_id), encoding="utf-8"
+    )
 
     if stats["dropped"]:
         print(f"dropped {stats['dropped']} oldest positions at the {OPEN_CAP} cap")
@@ -1465,6 +1775,8 @@ td a:hover { text-decoration: underline; }
 .o-unfilled { color: #d97a7a; } .o-marked { color: #8ab4f8; }
 .o-target_hit { color: #7ec97f; } .o-invalidated { color: #d97a7a; }
 .o-horizon_expired { color: #8a8f9c; } .o-closed_by_human { color: #8ab4f8; }
+.o-unloaded { color: #7ec97f; } .o-undercut { color: #d97a7a; }
+.o-resupplied { color: #d97a7a; }
 .r-Fine { color: #62a4da; } .r-Masterwork { color: #59b135; } .r-Rare { color: #fcd00b; }
 .r-Exotic { color: #ffa405; } .r-Ascended { color: #fb3e8d; } .r-Legendary { color: #a675f0; }
 .notes { color: #8a8f9c; font-size: 13px; margin-top: 24px; }
@@ -1564,7 +1876,33 @@ invalidation date, on a human status: closed override recorded in the
 registry (outcome closed_by_human, distinct from a model-driven
 resolution), or after a 45-day safety-net horizon, whichever comes first.
 Launch risk flags a farmable-class position (T6, festival, staples) with
-an expansion launch inside the next 30 days.</p>
+an expansion launch inside the next 30 days. Floor shows how much of the
+position's liquidation mark a structural floor underwrites (strategy S7);
+it is reported, never a filter.</p>
+</div>
+<h2>Corners</h2>
+<div class="meta">__CORNER_META__</div>
+<h3>Open corners</h3>
+__CORNER_OPEN__
+__CORNER_CLOSED__
+<div class="notes">
+<p>A corner (docs/INVESTING.md strategy S6) fills its whole lot at open, at
+the ladder VWAP the screen computed off a book that was really observed: a
+sweep is one instant action, and the daily snapshot carries no ladder to
+simulate it against, so inventing a fill mechanic for the entry would add
+fake precision to the leg that is not in doubt. The exit is where the
+fidelity belongs. On a day the best ask still sits at or above our relist
+nobody has undercut us, so we sell our own planned share of that day's
+demand; on a day it sits below we sell nothing and the day counts as
+undercut. New sell listings accumulate as re-supply, and once they pass the
+schedule's abort tripwire with units unsold, the moat is gone and the
+remainder is dumped at the bid.</p>
+<p>The honest limitation: the tracker ticks against a market where we did
+not actually buy, so the book we "removed" is still sitting there in the
+data. Measuring re-supply as accumulated new listings rather than as
+resting depth is the least-wrong option available, and even so it cannot
+tell a listing placed because of our raised price from one that would have
+arrived anyway.</p>
 </div>
 </body>
 </html>
