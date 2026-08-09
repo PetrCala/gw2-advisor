@@ -16,6 +16,8 @@ PRICES = {
     1005: [900, 5, 1000, 5],
     1006: [4000, 5, 4400, 5],
     1011: [10_000, 5, 11_000, 5],
+    1013: [2000, 5, 2200, 5],
+    1014: [1200, 5, 1400, 5],
     29185: [1_000_000, 5, 1_100_000, 5],
 }
 
@@ -35,7 +37,7 @@ def _row(**over):
 
 def test_load_graph_drops_disciplines_that_are_not_repeatable_routes():
     g = graph()
-    assert g["n_recipes"] == 10  # 11 rows, the Achievement one dropped
+    assert g["n_recipes"] == 14  # 15 rows, the Achievement one dropped
     assert g["skipped"] == {"discipline": 1}
     assert 1009 not in g["by_output"]
 
@@ -80,6 +82,15 @@ def test_ceiling_is_the_cheapest_route_per_unit_at_the_queue_front():
     assert bounds.ceiling(1003, PRICES, graph()) == (250, "double-click")
 
 
+def test_ceiling_takes_the_cheapest_of_several_routes_to_the_same_output():
+    # 1012 has two produce routes, the expensive one listed first so that
+    # neither "first wins" nor "take the maximum" can pass: merchant is
+    # 1 x (1000 + 1) = 1001 for one unit, forge is (200 + 1) + 2 x (50 + 1)
+    # = 303 for two. The ceiling caps every corner relist, so taking the
+    # dearest route inflates the relist and manufactures picks.
+    assert bounds.ceiling(1012, PRICES, graph()) == (151, "forge")
+
+
 def test_ceiling_prices_catalysts_at_zero_and_uses_the_output_range_maximum():
     # 250 x 101 = 25,250 for 200 - 1 net units; the Philosopher's Stone is free.
     assert bounds.ceiling(1005, PRICES, graph()) == (126, "forge")
@@ -116,6 +127,14 @@ def test_at_vendor_floor_matches_the_radar_formula_it_replaces():
     assert bounds.at_vendor_floor(100, None) is False
 
 
+def test_at_vendor_floor_is_inclusive_at_the_exact_boundary():
+    # The one copy of this test in the repo, run by invest.radar over every
+    # snapshot row, and season/compute.py's prefilter is documented as
+    # sharing its <= form: exactly at the vendor value counts as pinned.
+    assert bounds.at_vendor_floor(1000, 850) is True
+    assert bounds.at_vendor_floor(1000, 849) is False
+
+
 def test_vendor_floor_reads_the_snapshot_row():
     assert bounds.vendor_floor(_row()) == 500
     assert bounds.vendor_floor(_row(vendor_value=0)) is None
@@ -125,6 +144,15 @@ def test_vendor_floor_reads_the_snapshot_row():
 def test_conversion_floor_is_the_best_fodder_bid_net_of_tax():
     # Merchant route: 400 x 1 x 0.85 = 340 over the 3 units it eats.
     assert bounds.conversion_floor(2001, PRICES, graph()) == (113, "merchant")
+
+
+def test_conversion_floor_takes_the_best_of_several_profitable_consumers():
+    # 2005 feeds two priceable, profitable routes, the worse one listed
+    # first: merchant pays 2000 x 0.85 over the 2 units it eats (850), forge
+    # pays 1200 x 0.85 over 1 (1020). Both clear zero, so both reach the
+    # comparison and taking the worse one is a visible error rather than a
+    # dropped row.
+    assert bounds.conversion_floor(2005, PRICES, graph()) == (1020, "forge")
 
 
 def test_conversion_floor_excludes_stochastic_and_catalyst_recipes():
@@ -188,10 +216,12 @@ def test_structural_floor_without_a_graph_uses_the_vendor_leg_only():
 
 def test_structural_floor_never_reports_a_negative_distance_below_the_vendor_price():
     # The scorers.flip data-glitch case: the market price sits under the
-    # vendor buy-back, so coverage runs past 1 and distance goes negative
-    # rather than the floor being clamped away.
+    # vendor buy-back, so coverage runs past 1 and reads "at floor" while
+    # distance, the quantity risk rule 7 names, clamps at zero instead of
+    # rendering as a negative percentage.
     out = bounds.structural_floor(2001, _row(sell_price=100, vendor_value=500), PRICES)
     assert out["coverage"] > 1
+    assert out["distance"] == 0.0
     assert out["floor"] == 500
 
 

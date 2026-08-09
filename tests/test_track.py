@@ -669,6 +669,9 @@ def test_floor_flag_reports_vendor_coverage_of_the_liquidation_mark():
 
 def test_floor_flag_says_at_floor_once_coverage_reaches_one():
     assert track._floor_flag(7, _snap_row(7, sell_price=500)) == "at floor vendor"
+    # Exactly at the mark, the boundary itself: 1000 x 0.85 = 850.
+    assert track._floor_flag(7, _snap_row(7, vendor_value=850)) == "at floor vendor"
+    assert track._floor_flag(7, _snap_row(7, vendor_value=849)) == "100% vendor"
 
 
 def test_floor_flag_is_blank_without_an_id_a_row_or_a_floor():
@@ -735,6 +738,18 @@ def test_corner_sells_its_planned_share_on_a_day_it_still_owns_the_top():
     assert round(pos["revenue"], 1) == round(10 * 59_999 * 0.85, 1)
 
 
+def test_a_best_ask_exactly_at_our_relist_still_counts_as_owning_the_top():
+    # Nobody has undercut us at our own price, which is the whole test the
+    # simulated exit turns on.
+    pos = track.open_corner(_corner_pick(), D0)
+    track.tick_corner(pos, _corner_row(sell_price=59_999), _day(1))
+    assert pos["held_top_days"] == 1
+    assert pos["sold"] == 10
+    one_under = track.open_corner(_corner_pick(), D0)
+    track.tick_corner(one_under, _corner_row(sell_price=59_998), _day(1))
+    assert one_under["sold"] == 0
+
+
 def test_corner_position_stops_selling_on_an_undercut_day_and_counts_undercut_days():
     pos = track.open_corner(_corner_pick(), D0)
     track.tick_corner(pos, _corner_row(sell_price=50_000), _day(1))
@@ -743,13 +758,39 @@ def test_corner_position_stops_selling_on_an_undercut_day_and_counts_undercut_da
     assert pos["held_top_days"] == 0
 
 
-def test_corner_position_aborts_once_resupply_passes_the_tripwire():
+def test_corner_position_aborts_once_resupply_outruns_our_own_sales():
+    # 30 new listings against the 10 units we sold that day is 20 net, past
+    # the 18-unit tripwire.
     pos = track.open_corner(_corner_pick(), D0)
-    track.tick_corner(pos, _corner_row(**{"1d_sell_listed": 20}), _day(1))
+    track.tick_corner(pos, _corner_row(**{"1d_sell_listed": 30}), _day(1))
+    assert track.net_resupply(pos) == 20
     assert pos["aborted"] is True
     assert track.is_done(pos, _day(1)) is True
     rec = track.close_corner(pos, _day(1))
     assert rec["outcome"] == "resupplied"
+
+
+def test_the_abort_tripwire_is_not_a_clock():
+    # Re-supply exactly matching our own unload never breaks the moat, so
+    # it must never trip the abort however long the position runs.
+    # Measured gross instead of net, this fires on day 2 and every
+    # "resupplied" record would be partly a measure of elapsed time.
+    pos = track.open_corner(_corner_pick(**{"qty": 3000}), D0)
+    for d in range(1, 61):
+        track.tick_corner(pos, _corner_row(**{"1d_sell_listed": 10}), _day(d))
+    assert pos["resupply"] == 600
+    assert pos["aborted"] is False
+    assert track.net_resupply(pos) == 0
+
+
+def test_the_abort_tripwire_fires_at_the_exact_threshold():
+    pos = track.open_corner(_corner_pick(), D0)
+    track.tick_corner(pos, _corner_row(**{"1d_sell_listed": 27}), _day(1))
+    assert track.net_resupply(pos) == 17  # one short
+    assert pos["aborted"] is False
+    track.tick_corner(pos, _corner_row(**{"1d_sell_listed": 11}), _day(2))
+    assert track.net_resupply(pos) == 18
+    assert pos["aborted"] is True
 
 
 def test_corner_resolves_unloaded_once_the_whole_lot_is_gone():

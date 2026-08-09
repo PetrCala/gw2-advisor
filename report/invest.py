@@ -14,10 +14,12 @@ today's luxury desk picks and the corner screen (docs/INVESTING.md
 strategies S8, S4, S7 and S6).
 
 Two words that used to mean two different things on one screen, now
-separated: the NAV valuation convention is the "liquidation mark" (its JSON
-keys stay floor/stock_floor, which the stored series depends on), and
-"structural floor" is S7's bound. "Exit floor" on site/index.html is a third
-thing again (a sizing constraint) and is untouched.
+separated: the NAV valuation convention is "liquidation" (its JSON keys stay
+floor/stock_floor, which the stored series depends on), and "structural
+floor" is S7's bound, always measured against the price net of tax, which is
+the same denominator report.track's per-position Floor column uses. "Exit
+floor" on site/index.html is a third thing again (a sizing constraint) and
+is untouched.
 
 Privacy rule: the NAV series is stored in the private bucket in absolute
 gold, but everything published here is rebased to 100 or expressed as a
@@ -89,7 +91,13 @@ def nav_public(nav):
     # already prints bankroll_share per class, so one gold figure in this
     # payload would give class_value = floor_gold / floor_coverage and then
     # BANKROLL_G = class_value / bankroll_share. Copper stops here.
-    structural = latest.get("stock_floor_structural")
+    #
+    # Denominator is the stock at the ask net of tax (mark_classes), which
+    # is what invest.bounds.floor_coverage and docs/INVESTING.md rule 7 both
+    # measure a floor against, and what report.track's per-position Floor
+    # column uses. One word, one denominator, on both pages.
+    structural = latest.get("stock_structural")
+    stock_mark = sum((latest.get("mark_classes") or {}).values())
     composition = [
         {
             "cls": cls,
@@ -113,10 +121,10 @@ def nav_public(nav):
         "mark_premium": round(latest["mark"] / latest["floor"] - 1, 4)
         if latest.get("floor")
         else None,
-        "floor_coverage": round(structural / stock, 4)
-        if structural is not None and stock
+        "floor_coverage": round(structural / stock_mark, 4)
+        if structural is not None and stock_mark
         else None,
-        "floor_items": latest.get("floor_items"),
+        "floor_items": latest.get("structural_items"),
         "composition": composition,
         "returns": returns,
     }
@@ -129,12 +137,22 @@ def exposure_rows(nav, bankroll_copper):
         return []
     latest = points[-1]
     classes = latest.get("classes") or {}
-    floor_classes = latest.get("floor_classes") or {}
+    # Only classes a floor was actually computable for appear here, so a
+    # missing key is "unmeasured" and renders n/a. Nothing ever renders 0%,
+    # because invest.bounds never records a zero floor: vendor_floor returns
+    # None at vendor_value 0 and conversion_floor drops a route worth
+    # nothing, so a stored zero could only ever have meant "unmeasured".
+    structural_classes = latest.get("structural_classes") or {}
+    mark_classes = latest.get("mark_classes") or {}
     stock = latest.get("stock_floor") or 0
     rows = []
     for cls in tags.CLASSES:
         v = classes.get(cls, 0)
-        f = floor_classes.get(cls)
+        f = structural_classes.get(cls)
+        # The ask net of tax, matching invest.bounds.floor_coverage and
+        # report.track's per-position column; classes[] is the liquidation
+        # value and is the wrong denominator for this word.
+        m = mark_classes.get(cls) or 0
         rows.append(
             {
                 "cls": cls,
@@ -146,7 +164,7 @@ def exposure_rows(nav, bankroll_copper):
                 # A ratio and never a level, for the reason nav_public
                 # states: two ratios over one class carry no scale, one
                 # gold figure would unmask the bankroll.
-                "floor_coverage": round(f / v, 4) if f is not None and v else None,
+                "floor_coverage": round(f / m, 4) if f and m else None,
             }
         )
     return rows
@@ -297,7 +315,7 @@ def caps_table(payload):
 
 def coverage(v):
     """Floor coverage as a cell: "n/a" when nothing was computable, "at
-    floor" once the structural floor reaches the liquidation mark, a
+    floor" once the structural floor reaches the price net of tax, a
     percentage otherwise. Never a negative percentage, and never 0% for a
     class whose floor was simply never measurable (luxury genuinely has
     none), which is what separates "unmeasured" from "measured and bad"."""
@@ -329,7 +347,7 @@ def exposure_table(payload):
         if nav.get("items") is not None:
             meta.append(f"{nav['items']:,} distinct items held")
         if nav.get("mark_premium") is not None:
-            meta.append(f"patient mark {pct(nav['mark_premium'])} above the liquidation mark")
+            meta.append(f"patient mark {pct(nav['mark_premium'])} above liquidation")
         if nav.get("floor_coverage") is not None:
             items = nav.get("floor_items")
             tail = f" across {items:,} items" if items else ""
@@ -572,6 +590,35 @@ def radar_table(payload):
     return abnormal_html + pump_html + sink_html
 
 
+def bail_cell(p):
+    """The bail-out cell, which must never read as a friendly percentage on
+    a lot the buy side cannot absorb.
+
+    invest.corner.bail_out returns no percentage at all below its coverage
+    minimum, and the coverage rides along even when it does, because a
+    corner is selected for a thin book: the share of the lot today's bids
+    actually reach is half the meaning of the number.
+    """
+    v, cov = p.get("bail_out_pct"), p.get("bail_out_coverage")
+    if not cov:
+        return "no buy book"
+    if v is None:
+        return f"not coverable ({cov:.0%} of lot)"
+    return pct(v) if cov >= 1 else f"{pct(v)} on {cov:.0%} of lot"
+
+
+def unload_cells(p):
+    """(schedule, tripwire): the exit, which S6 calls the binding constraint
+    and requires designed before the first buy, so it belongs on the row
+    that moves gold rather than only in the paper record."""
+    u = p.get("unload") or {}
+    per_week = (u.get("per_day") or 0) * 7
+    days = p.get("unload_days")
+    schedule = f"{days:.0f}d at {per_week:,.0f}/wk" if days is not None else ""
+    abort = u.get("abort_qty")
+    return schedule, f"{abort:,} new" if abort else ""
+
+
 def corner_table(payload):
     doc = payload.get("corner")
     if not doc:
@@ -587,28 +634,45 @@ def corner_table(payload):
         f"{doc.get('through', '?')}; {len(picks)} are actionable."
     )
     if picks:
+        heads = [
+            "Item", "Lot", "Swallow cost", "Avg cost", "Relist", "Ceiling",
+            "Ceiling from", "Multiple", "Demand/day", "Refill/day", "Race",
+            "Score", "Unload", "Abort at", "Bail-out",
+        ]
+        rows = []
+        for p in picks:
+            schedule, tripwire = unload_cells(p)
+            rows.append([
+                '<a href="https://www.gw2bltc.com/en/item/{}">{}</a>'.format(
+                    p["id"], escape(p["name"])
+                ),
+                f"{p['qty']:,}",
+                gold(p["cost"]),
+                gold(p["avg_cost"]),
+                gold(p["relist_at"]),
+                gold(p["ceiling"]),
+                escape(p["ceiling_source"]),
+                f"{p['mult']:.2f}x",
+                f"{p['demand_per_day']:g}",
+                f"{p['refill_per_day']:g}",
+                f"{p['race']:.2f}",
+                f"{p['score']:.2f}",
+                schedule,
+                tripwire,
+                bail_cell(p),
+            ])
         cells = "".join(
-            "<tr><td><a href=\"https://www.gw2bltc.com/en/item/{}\">{}</a></td>"
-            "<td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>"
-            "<td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
-                p["id"], escape(p["name"]), gold(p["cost"]), gold(p["avg_cost"]),
-                gold(p["relist_at"]), gold(p["ceiling"]), escape(p["ceiling_source"]),
-                f"{p['mult']:.2f}x", f"{p['demand_per_day']:g}",
-                f"{p['refill_per_day']:g}" + ("*" if p.get("refill_unobserved") else ""),
-                f"{p['race']:.2f}", f"{p['score']:.2f}",
-                f"{p['unload_days']:.0f}d", pct(p.get("bail_out_pct")),
-            )
-            for p in picks
+            "<tr>" + "".join(f"<td>{c}</td>" for c in row) + "</tr>" for row in rows
         )
         table = (
-            "<table><thead><tr><th>Item</th><th>Swallow cost</th><th>Avg cost</th>"
-            "<th>Relist</th><th>Ceiling</th><th>Ceiling from</th><th>Multiple</th>"
-            "<th>Demand/day</th><th>Refill/day</th><th>Race</th><th>Score</th>"
-            f"<th>Unload</th><th>Bail-out</th></tr></thead><tbody>{cells}</tbody></table>"
+            "<table><thead><tr>"
+            + "".join(f"<th>{h}</th>" for h in heads)
+            + f"</tr></thead><tbody>{cells}</tbody></table>"
             "<p>Check the swallow cost against your own per-corner cap before "
             "any gold moves; this table deliberately carries no bankroll-derived "
-            "figure. A refill rate marked * was never observed, so it sits at the "
-            "floor the window could measure rather than at zero.</p>"
+            "figure. Unload is the whole lot at our own capture share of demand, "
+            "and Abort at is how much new supply, net of what we have sold, ends "
+            "the plan and dumps the remainder.</p>"
         )
     else:
         table = (
@@ -834,7 +898,7 @@ mid-2019 because the mirror carries no fills before then.</li>
 current best bid, net of the 15% cut); the sell-listing mark is shown only
 as a premium. Absolute gold never appears here: the NAV line is rebased to
 100 and shares are percentages.</li>
-<li>Floor coverage is the share of a class's liquidation mark underwritten
+<li>Floor coverage is the share of a class's price net of tax underwritten
 by a structural floor (strategy S7): the vendor buy-back price, or the most
 any conversion that consumes the item could afford to pay for it as fodder,
 whichever is higher. It is reported, never a filter: risk rule 7 says
@@ -850,9 +914,14 @@ low as it defensibly can. Ceiling from tells you whether that moat is
 structural (forge, merchant, double-click) or only historical (traded high),
 which matters because ceilings move: the 2016-17 hardened leather squeeze
 ended when ArenaNet shipped a leather farm. Bail-out is an estimate of
-dumping the whole lot into today's buy book, shown because a thin buy book
-is what makes a corner possible in the first place; it is not a floor and
-another trader's wall is not your exit liquidity.</li>
+dumping into today's buy book, shown because a thin buy book is what makes
+a corner possible in the first place. It values only the units the visible
+bids actually reach and says so ("on 40% of lot"), and it reads "not
+coverable" when the book reaches less than a quarter of the lot, because
+extrapolating the deepest bid across a lot that book cannot absorb is how a
+dump that would lose most of its value prints as a small number. It is not
+a floor either way, and another trader's wall is not your exit
+liquidity.</li>
 <li>The gem line is the cost of buying 100 gems with gold (gw2tp history
 plus the official exchange spot). It is the closest thing to an outside
 inflation gauge, not a tradable series: the round trip loses ~35%.</li>
