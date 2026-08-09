@@ -174,3 +174,15 @@ def releases_between(d0, d1):
         for iso, label in RELEASES
         if d0 <= date.fromisoformat(iso) <= d1
     ]
+
+
+def next_release(d0, d1):
+    """The earliest (date, label) from RELEASES falling in [d0, d1], or
+    None; used by invest.risk to report a days-until count without
+    re-deriving the date parsing."""
+    candidates = sorted(
+        (date.fromisoformat(iso), label)
+        for iso, label in RELEASES
+        if d0 <= date.fromisoformat(iso) <= d1
+    )
+    return candidates[0] if candidates else None

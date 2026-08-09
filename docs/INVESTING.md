@@ -142,6 +142,10 @@ material class, the return from buying at launch-minus-90d and selling
 into launch week. The season machinery (`season/cycles.py`) generalizes
 from day-of-year windows to event-anchored windows; the evidence table
 renders like the festival one (per-cycle returns, hit rate, worst cycle).
+M6.d built only the six full-expansion half of this (`invest/release_study.py`,
+`RELEASES` in `season/events.py`): no curated date list for the SotO/
+Janthir/VoE-era quarterly relic drops exists anywhere in the repo yet, so
+that half of this section's evidence is a named follow-up, not shipped.
 
 Sizing: this is the rung that absorbs 50k+ gold. Accumulate via laddered
 buy orders over weeks, capped at 25% of daily flow; exit into the release
@@ -427,20 +431,28 @@ What it can mean, concretely:
 
 1. Bankroll config: one number the user maintains (investable gold), plus
    allocation caps per strategy rung, e.g. flips uncapped (self-limiting),
-   festival 25%, luxury 25%, release basket 30%, vault 15%, corners 10%
+   festival 25%, luxury 25%, thesis registry 20% (M6.d, `invest/bankroll.py`;
+   provisional, needs explicit sign-off before real gold is sized against
+   a live thesis position), release basket 30%, vault 15%, corners 10%
    hard. Caps bind at entry time; the report shows current exposure vs cap.
 2. Exit-time sizing: every position's size obeys
    `qty <= capture x sell_flow x max_exit_days` for its tier (flips 2d,
-   festival in-window 14d, luxury 30d, vault/corners 90d), and the dump
-   loss floor from the live book, reusing `apply_exit_floor`. A position
-   you cannot leave is not an investment, it is furniture.
+   festival in-window 14d, luxury 30d, thesis registry 45d (M6.d,
+   `invest.thesis.THESIS_HORIZON_DAYS`; also provisional), vault/corners
+   90d), and the dump loss floor from the live book, reusing
+   `apply_exit_floor`. A position you cannot leave is not an investment,
+   it is furniture.
 3. Class exposure: items tagged by material class (T6, festival, luxury,
    staples, new-release); one patch tends to hit one class (a magic-find
    change reprices all fine mats at once), so class caps are the real
    diversification unit, not item counts.
 4. Event-risk calendar: the release table already exists; positions in
-   farmable materials get flagged when a launch approaches (new faucets),
-   vault positions get flagged around black lion rotation announcements.
+   farmable materials get flagged when a launch approaches (new faucets) -
+   built in M6.d as `invest/risk.py`, wired into `report/track.py`'s paper
+   position tables, farmable meaning T6/festival/staples for now - vault
+   positions get flagged around black lion rotation announcements, but S5
+   (vault holds) is not assigned to any M6.a-e milestone yet, so that half
+   of this risk flag has no position type to attach to until it is.
 5. Tripwires instead of stops: daily change-point monitoring on price and
    flow per held item (CUSUM to start; the Bayesian online variant later,
    with the patch calendar as the hazard prior, so known patch dates

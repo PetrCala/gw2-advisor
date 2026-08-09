@@ -119,10 +119,25 @@ def test_render_with_no_artifacts_is_a_complete_empty_state_page():
     assert "No NAV series yet" in html
     assert "No craft-carry artifact yet" in html
     assert "No luxury desk artifact yet" in html
+    assert "No thesis registry entries yet" in html
+    assert "No release event-study artifact yet" in html
+    assert "No market radar artifact yet" in html
     for placeholder in ("__GENERATED__", "__META__", "__RETURNS__", "__CAPS__",
                         "__EXPOSURE__", "__CONSTITUENTS__", "__CRAFT__",
-                        "__LUXURY__", "__DATA__"):
+                        "__LUXURY__", "__THESIS__", "__RELEASES__", "__RADAR__",
+                        "__DATA__"):
         assert placeholder not in html
+
+
+def test_render_with_all_new_artifacts_carries_their_tables():
+    payload = invest.build_payload(
+        None, None, None, theses=thesis_doc(), releases_doc=release_doc(),
+        radar_doc=radar_doc(),
+    )
+    html = invest.render(payload)
+    assert "Symbol of Enhancement" in html
+    assert "T6 fine mats" in html
+    assert "Vendor Floor Mat" in html
 
 
 def test_render_with_artifacts_carries_series_and_tables():
@@ -195,3 +210,110 @@ def test_luxury_table_shows_placements_and_meta():
     html = invest.luxury_table(payload)
     assert "Chak Infusion" in html
     assert "22.3%" in html  # margin_pct rendered as a share
+
+
+# --- thesis registry -----------------------------------------------------
+
+
+def thesis_doc():
+    return [
+        {
+            "key": "voe-q3-relic-charms", "id": 89141, "name": "Symbol of Enhancement",
+            "direction": "long", "bucket": "active",
+            "dist_to_ceiling": -0.05, "dist_to_target": -0.3,
+            "days_to_catalyst": 20, "days_to_invalidation": 40,
+        },
+        {
+            "key": "avoid-example", "id": 12345, "name": "Something to Avoid",
+            "direction": "avoid", "bucket": "watching",
+            "days_to_catalyst": 10, "days_to_invalidation": 30,
+        },
+    ]
+
+
+def test_thesis_table_shows_long_and_avoid_entries():
+    payload = invest.build_payload(None, None, None, theses=thesis_doc())
+    html = invest.thesis_table(payload)
+    assert "Symbol of Enhancement" in html
+    assert "Something to Avoid" in html
+    assert "thesis-avoid" in html
+
+
+def test_thesis_table_is_empty_state_without_entries():
+    payload = invest.build_payload(None, None, None, theses=[])
+    html = invest.thesis_table(payload)
+    assert "No thesis registry entries yet" in html
+
+
+# --- release event study -------------------------------------------------
+
+
+def release_doc():
+    return {
+        "generated": "2026-08-10T01:40:00Z",
+        "through": "2026-08-10",
+        "classes": [
+            {
+                "class": "t6",
+                "cycles": [{"label": "End of Dragons", "ret": 0.2, "items_priced": 4, "items_total": 8}],
+                "hit_rate": 1.0,
+                "confidence": "low",
+                "coverage": {"launches_priced": 1, "launches_total": 6, "ids_total": 8},
+            },
+            {
+                "class": "staples",
+                "cycles": [],
+                "hit_rate": None,
+                "confidence": "low",
+                "coverage": {"launches_priced": 0, "launches_total": 6, "ids_total": 9},
+            },
+        ],
+    }
+
+
+def test_release_table_shows_both_classes_and_coverage():
+    payload = invest.build_payload(None, None, None, releases_doc=release_doc())
+    html = invest.release_table(payload)
+    assert "T6 fine mats" in html and "staples" in html
+    assert "1 of 6" in html
+    assert "0 of 6" in html
+
+
+def test_release_table_is_empty_state_without_an_artifact():
+    payload = invest.build_payload(None, None, None, releases_doc=None)
+    html = invest.release_table(payload)
+    assert "No release event-study artifact yet" in html
+
+
+# --- market radar ----------------------------------------------------------
+
+
+def radar_doc(history_days=90):
+    return {
+        "generated": "2026-08-10T01:40:00Z",
+        "through": "2026-08-10",
+        "history_days": history_days,
+        "abnormal": [{"id": 1, "z": {"price": 5.2}, "flags": ["price"]}],
+        "pumps": [42],
+        "sinks": [{"id": 7, "name": "Vendor Floor Mat", "sell_price": 8, "flow_7d_avg": 150.0}],
+    }
+
+
+def test_radar_table_shows_all_three_screens():
+    payload = invest.build_payload(None, None, None, radar_doc=radar_doc())
+    html = invest.radar_table(payload)
+    assert "Abnormal activity" in html
+    assert "Pump filter" in html
+    assert "Vendor Floor Mat" in html
+
+
+def test_radar_table_is_empty_state_without_an_artifact():
+    payload = invest.build_payload(None, None, None, radar_doc=None)
+    html = invest.radar_table(payload)
+    assert "No market radar artifact yet" in html
+
+
+def test_radar_table_shows_burn_in_message_below_min_obs():
+    payload = invest.build_payload(None, None, None, radar_doc=radar_doc(history_days=2))
+    html = invest.radar_table(payload)
+    assert "Still collecting the rolling baseline" in html

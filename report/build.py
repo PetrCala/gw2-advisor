@@ -20,11 +20,13 @@ from pathlib import Path
 from collector import dw2, gw2api
 from features import reprice
 from invest import bankroll
+from invest import thesis as invest_thesis
 from scorers import flip, flip_actions
 from season import actions as season_actions
 from season import score as season_score
 
 SITE = Path(__file__).resolve().parent.parent / "site"
+THESES_PATH = Path(__file__).resolve().parent.parent / "invest" / "theses.yaml"
 
 CSV_COLS = [
     "id",
@@ -237,17 +239,46 @@ def main():
         festivals = season_actions.next_festivals(today, seasonal["picks"])
         add_exit_floor(seasonal["picks"])
 
+    theses = []
+    if not local:
+        try:  # a broken registry entry refines the page, it doesn't gate it
+            theses = build_theses(snap)
+        except Exception as e:
+            print(f"theses unavailable: {e}")
+
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     write_site(
         picks, scanned=len(snap), generated=generated, price_ts=price_ts,
-        seasonal=seasonal, festivals=festivals,
+        seasonal=seasonal, festivals=festivals, theses=theses,
     )
     n_seasonal = len(seasonal["picks"]) if seasonal else 0
     print(
         f"{len(picks)} picks from {len(shortlist)} shortlisted of {len(snap)} items "
         f"(reprice rates: {'yes' if rates else 'no'}, "
-        f"seasonal picks: {n_seasonal}) -> {SITE / 'index.html'}"
+        f"seasonal picks: {n_seasonal}, theses: {len(theses)}) -> {SITE / 'index.html'}"
     )
+
+
+def build_theses(snap):
+    """load invest/theses.yaml, enrich against the fresh snapshot, then
+    fetch order books only for the entries that need one today (watching
+    or active - mirrors add_exit_floor's "only fetch books for picks that
+    need one" pattern) and re-enrich so active legs are sized against a
+    live book rather than left unsized on the first pass.
+    """
+    raw = invest_thesis.load_theses(THESES_PATH)
+    if not raw:
+        return []
+    fresh_by_id = {
+        it.get("id"): it.get("sell_price") for it in snap if it.get("id") is not None
+    }
+    today = datetime.now(timezone.utc).date()
+    theses = invest_thesis.enrich_all(raw, today, fresh_by_id)
+    need_books = [t["id"] for t in theses if t.get("bucket") in ("watching", "active")]
+    if need_books:
+        books = gw2api.fetch_listings(need_books)
+        theses = invest_thesis.enrich_all(raw, today, fresh_by_id, books)
+    return theses
 
 
 def add_exit_floor(spicks):
@@ -383,7 +414,7 @@ def festivals_html(festivals, today):
     return " &middot; ".join(bits)
 
 
-def write_site(picks, scanned, generated, price_ts, seasonal=None, festivals=()):
+def write_site(picks, scanned, generated, price_ts, seasonal=None, festivals=(), theses=()):
     SITE.mkdir(exist_ok=True)
 
     payload = {
@@ -415,6 +446,7 @@ def write_site(picks, scanned, generated, price_ts, seasonal=None, festivals=())
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "queue": [{k: p.get(k) for k in ACTIONS_COLS} for p in spicks],
         "festivals": list(festivals),
+        "theses": list(theses),
     }
     (SITE / "actions.json").write_text(
         json.dumps(actions_payload, indent=1), encoding="utf-8"

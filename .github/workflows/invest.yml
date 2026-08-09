@@ -36,3 +36,9 @@ jobs:
       - run: python -m invest.index
         env:
           S3_BUCKET: ${{ vars.S3_BUCKET }}
+      # Release event study (M6.d, S1): a smaller, more speculative evidence
+      # artifact, so a failure here never affects the job's exit status.
+      - run: python -m invest.release_study
+        continue-on-error: true
+        env:
+          S3_BUCKET: ${{ vars.S3_BUCKET }}

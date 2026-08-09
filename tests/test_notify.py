@@ -74,6 +74,49 @@ def test_render_comment():
     assert "as of 2026-08-07T10:00:00Z" in body
 
 
+def _thesis_row(**over):
+    r = {"key": "voe-q3-relic-charms", "id": 89141, "name": "Symbol of Enhancement",
+         "bucket": "active"}
+    r.update(over)
+    return r
+
+
+def test_diff_theses_fires_on_active_to_catalyst_passed():
+    ev = notify.diff_theses(
+        [_thesis_row(bucket="active")], [_thesis_row(bucket="catalyst_passed")]
+    )
+    assert [e["kind"] for e in ev] == ["thesis_catalyst"]
+    assert "[THESIS] CATALYST PASSED" in ev[0]["line"]
+
+
+def test_diff_theses_fires_on_any_bucket_to_invalidated():
+    ev = notify.diff_theses(
+        [_thesis_row(bucket="watching")], [_thesis_row(bucket="invalidated")]
+    )
+    assert [e["kind"] for e in ev] == ["thesis_invalidated"]
+    assert "[THESIS] INVALIDATION DATE PASSED" in ev[0]["line"]
+
+
+def test_diff_theses_is_silent_on_staying_in_a_bucket():
+    assert notify.diff_theses(
+        [_thesis_row(bucket="active")], [_thesis_row(bucket="active")]
+    ) == []
+
+
+def test_diff_theses_ignores_catalyst_passed_not_from_active():
+    ev = notify.diff_theses(
+        [_thesis_row(bucket="watching")], [_thesis_row(bucket="catalyst_passed")]
+    )
+    assert ev == []
+
+
+def test_diff_theses_does_not_repeat_once_already_invalidated():
+    ev = notify.diff_theses(
+        [_thesis_row(bucket="invalidated")], [_thesis_row(bucket="invalidated")]
+    )
+    assert ev == []
+
+
 def test_render_feed_escapes_and_caps():
     log = [
         {"kind": "buy", "id": i, "name": "A & B",

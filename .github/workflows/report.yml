@@ -51,6 +51,12 @@ jobs:
         continue-on-error: true
         env:
           S3_BUCKET: ${{ vars.S3_BUCKET }}
+      # Market radar (M6.d, S2): the widened dw2 snapshot mirror call is
+      # unmetered, so no GW2_API_KEY is needed here either.
+      - run: python -m invest.radar
+        continue-on-error: true
+        env:
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
       # Festival sizing reads BANKROLL_G (season.actions.enrich_all); unset
       # degrades cleanly to the flat SEASON_CAPITAL default.
       - run: python -m report.build

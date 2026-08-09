@@ -35,6 +35,8 @@ from invest.craft import CRAFT_KEY
 from invest.index import BENCH_KEY, trailing_return
 from invest.luxury import LUXURY_KEY
 from invest.nav import NAV_KEY
+from invest.radar import RADAR_KEY, RADAR_MIN_OBS
+from invest.release_study import RELEASES_KEY
 
 SITE = Path(__file__).resolve().parent.parent / "site"
 
@@ -48,6 +50,8 @@ CLASS_LABELS = {
     "luxury": "luxury (500g+)",
     "other": "everything else",
 }
+
+CLASS_STUDY_LABELS = {"t6": "T6 fine mats", "staples": "staples"}
 
 
 def rebase(values, base=100.0):
@@ -162,7 +166,21 @@ def luxury_public(doc):
     }
 
 
-def build_payload(bench, nav, bankroll_copper, craft_series=None, luxury_doc=None):
+def release_public(doc):
+    """The publishable slice of the release-study artifact, or None without
+    one yet - returns/hit-rate/confidence are all ratios about the market,
+    not the user's holdings, so this needs no privacy rebasing."""
+    if not doc or not doc.get("classes"):
+        return None
+    return {
+        "generated": doc.get("generated"),
+        "through": doc.get("through"),
+        "classes": doc["classes"],
+    }
+
+
+def build_payload(bench, nav, bankroll_copper, craft_series=None, luxury_doc=None,
+                   theses=None, releases_doc=None, radar_doc=None):
     nav_pub = nav_public(nav)
     return {
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -186,6 +204,9 @@ def build_payload(bench, nav, bankroll_copper, craft_series=None, luxury_doc=Non
         "exposure": exposure_rows(nav, bankroll_copper),
         "craft": craft_rows(craft_series),
         "luxury": luxury_public(luxury_doc),
+        "theses": theses or [],
+        "releases": release_public(releases_doc),
+        "radar": radar_doc,
     }
 
 
@@ -363,6 +384,141 @@ def luxury_table(payload):
     )
 
 
+def thesis_table(payload):
+    """One row per registry entry regardless of bucket - a small,
+    hand-curated registry is not the auto-generated season candidate list
+    that needed opens_soon/dormant suppression, so watching entries render
+    too. "avoid" rows get a distinct badge and no qty/capital columns:
+    nothing was ever sized or tracked for them."""
+    rows = payload.get("theses") or []
+    if not rows:
+        return "<p>No thesis registry entries yet; add one to invest/theses.yaml.</p>"
+    cells = []
+    for r in rows:
+        name = escape(r.get("name") or "")
+        bucket = escape(r.get("bucket") or "")
+        dtc = r.get("days_to_catalyst")
+        dti = r.get("days_to_invalidation")
+        if r.get("direction") == "avoid":
+            cells.append(
+                '<tr><td>{}</td><td class="thesis-avoid">avoid</td><td>{}</td>'
+                "<td></td><td></td><td>{}</td><td>{}</td></tr>".format(
+                    name, bucket, dtc, dti
+                )
+            )
+            continue
+        cells.append(
+            "<tr><td>{}</td><td>long</td><td>{}</td><td>{}</td><td>{}</td>"
+            "<td>{}</td><td>{}</td></tr>".format(
+                name, bucket, pct(r.get("dist_to_ceiling")),
+                pct(r.get("dist_to_target")), dtc, dti,
+            )
+        )
+    return (
+        "<table><thead><tr><th>Item</th><th>Direction</th><th>Bucket</th>"
+        "<th>vs ceiling</th><th>vs target</th><th>Days to catalyst</th>"
+        f"<th>Days to invalidation</th></tr></thead><tbody>{''.join(cells)}</tbody></table>"
+    )
+
+
+def release_table(payload):
+    rel = payload.get("releases")
+    if not rel or not rel.get("classes"):
+        return (
+            "<p>No release event-study artifact yet; the weekly invest "
+            "workflow fills this in.</p>"
+        )
+    rows = []
+    for c in rel["classes"]:
+        cov = c.get("coverage") or {}
+        rows.append(
+            "<tr><td>{}</td><td>{} of {}</td><td>{}</td><td>{}</td></tr>".format(
+                escape(CLASS_STUDY_LABELS.get(c["class"], c["class"])),
+                cov.get("launches_priced", 0), cov.get("launches_total", 0),
+                share(c.get("hit_rate"), 0) or "n/a", escape(c.get("confidence") or ""),
+            )
+        )
+    body = "".join(rows)
+    note = (
+        "<p>Festival, luxury and other are intentionally excluded from this "
+        "study: festival is already covered by the seasonal-carry evidence "
+        "under a different lens and would double-count here, luxury is a "
+        "live-price threshold rule with no historically-valid retroactive "
+        "equivalent, and other has no coherent thesis to aggregate. Six "
+        "launches (HoT through VoE) is a hard sample ceiling; both class "
+        "rows always render regardless of n, and every launch count is "
+        "shown raw rather than as a bare percentage.</p>"
+    )
+    return (
+        "<table><thead><tr><th>Class</th><th>Launches priced</th>"
+        f"<th>Hit rate</th><th>Confidence</th></tr></thead><tbody>{body}</tbody></table>{note}"
+    )
+
+
+def radar_table(payload):
+    radar = payload.get("radar")
+    if not radar:
+        return (
+            "<p>No market radar artifact yet; the daily invest.radar step "
+            "fills this in.</p>"
+        )
+    history_days = radar.get("history_days") or 0
+    if history_days < RADAR_MIN_OBS:
+        return (
+            f"<p>Still collecting the rolling baseline ({history_days} of "
+            f"{RADAR_MIN_OBS} minimum days); the abnormal-activity and pump "
+            "screens fill in once enough history has accumulated. The sink "
+            "watchlist below needs no history and is live already.</p>"
+        )
+    abnormal = radar.get("abnormal") or []
+    pumps = radar.get("pumps") or []
+    sinks = radar.get("sinks") or []
+
+    abnormal_body = "".join(
+        '<tr><td><a href="https://www.gw2bltc.com/en/item/{0}">{0}</a></td><td>{1}</td></tr>'.format(
+            r["id"],
+            ", ".join(
+                f"{k} {v:+.1f}" for k, v in (r.get("z") or {}).items() if v is not None
+            ),
+        )
+        for r in abnormal[:40]
+    )
+    abnormal_html = (
+        f"<h3>Abnormal activity ({len(abnormal)} flagged)</h3>"
+        "<table><thead><tr><th>Item</th><th>|z| >= "
+        f"{radar.get('z_threshold', 4.0):g} on</th></tr></thead>"
+        f"<tbody>{abnormal_body}</tbody></table>"
+        if abnormal
+        else f"<h3>Abnormal activity</h3><p>Nothing flagged today.</p>"
+    )
+
+    pump_html = (
+        f"<h3>Pump filter ({len(pumps)} flagged)</h3>"
+        "<p>" + ", ".join(
+            f'<a href="https://www.gw2bltc.com/en/item/{i}">{i}</a>' for i in pumps
+        ) + "</p>"
+        if pumps
+        else "<h3>Pump filter</h3><p>Nothing flagged today.</p>"
+    )
+
+    sink_body = "".join(
+        '<tr><td><a href="https://www.gw2bltc.com/en/item/{}">{}</a></td>'
+        "<td>{}</td><td>{}</td></tr>".format(
+            r["id"], escape(r["name"]), gold(r["sell_price"]), r["flow_7d_avg"]
+        )
+        for r in sinks[:40]
+    )
+    sink_html = (
+        f"<h3>Sink-anticipation watchlist ({len(sinks)})</h3>"
+        "<table><thead><tr><th>Item</th><th>Sell price</th>"
+        f"<th>7d avg sell flow</th></tr></thead><tbody>{sink_body}</tbody></table>"
+        if sinks
+        else "<h3>Sink-anticipation watchlist</h3><p>Nothing pinned at the "
+        "vendor floor with enough flow today.</p>"
+    )
+    return abnormal_html + pump_html + sink_html
+
+
 def render(payload):
     bench = payload.get("bench")
     if bench and bench.get("index"):
@@ -383,14 +539,27 @@ def render(payload):
     html = html.replace("__CONSTITUENTS__", constituents_table(payload))
     html = html.replace("__CRAFT__", craft_table(payload))
     html = html.replace("__LUXURY__", luxury_table(payload))
+    html = html.replace("__THESIS__", thesis_table(payload))
+    html = html.replace("__RELEASES__", release_table(payload))
+    html = html.replace("__RADAR__", radar_table(payload))
     # </ would end the script block early if an item name ever carried it
     html = html.replace("__DATA__", json.dumps(payload).replace("</", "<\\/"))
     return html
 
 
+def _read_actions_theses():
+    """site/actions.json's "theses" key: report.build already ran earlier
+    in the same job, so this is a local read, not a second S3 round trip."""
+    try:
+        doc = json.loads((SITE / "actions.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return doc.get("theses") or []
+
+
 def main():
     local = "--local" in sys.argv
-    bench = nav = craft_series = luxury_doc = None
+    bench = nav = craft_series = luxury_doc = releases_doc = radar_doc = None
     if not local:
         from collector.s3store import Store
 
@@ -399,9 +568,13 @@ def main():
         nav = store.get_json_gz(NAV_KEY)
         craft_series = store.get_json_gz(CRAFT_KEY)
         luxury_doc = store.get_json_gz(LUXURY_KEY)
+        releases_doc = store.get_json_gz(RELEASES_KEY)
+        radar_doc = store.get_json_gz(RADAR_KEY)
 
+    theses = _read_actions_theses()
     payload = build_payload(
-        bench, nav, bankroll.bankroll_copper(), craft_series, luxury_doc
+        bench, nav, bankroll.bankroll_copper(), craft_series, luxury_doc,
+        theses, releases_doc, radar_doc,
     )
     SITE.mkdir(exist_ok=True)
     (SITE / "invest.json").write_text(json.dumps(payload, indent=1), encoding="utf-8")
@@ -410,7 +583,10 @@ def main():
         f"benchmarks page (index: {'yes' if bench else 'no'}, "
         f"nav points: {len((nav or {}).get('points') or [])}, "
         f"craft points: {len((craft_series or {}).get('points') or [])}, "
-        f"luxury picks: {len((luxury_doc or {}).get('picks') or [])}) "
+        f"luxury picks: {len((luxury_doc or {}).get('picks') or [])}, "
+        f"theses: {len(theses)}, "
+        f"releases: {'yes' if releases_doc else 'no'}, "
+        f"radar: {'yes' if radar_doc else 'no'}) "
         f"-> {SITE / 'invest.html'}"
     )
 
@@ -494,6 +670,25 @@ horizon and by a few units per item so the book stays spread across names.
 Picks open as paper positions on <a href="track.html">the track record
 page</a> under the luxury desk strategy tag.</p>
 __LUXURY__
+<h2>Thesis registry</h2>
+<p>Strategy S2: a small, hand-edited registry of item-leg convictions
+(<a href="https://github.com/PetrCala/gw2-advisor/blob/main/invest/theses.yaml">invest/theses.yaml</a>),
+each with a catalyst, a date, an entry ceiling, a target and an
+invalidation rule. Every entry renders here regardless of bucket so a
+missed nag is never the only way to see current state; "avoid" entries are
+notify-only and are never sized or paper-tracked.</p>
+__THESIS__
+<h2>Release event study</h2>
+<p>Strategy S1: per-launch tax-adjusted returns for the material classes
+with a curated id set matching the strategy's own thesis text.</p>
+__RELEASES__
+<h2>Market radar</h2>
+<p>Strategy S2's cheap screens over the daily snapshot: an abnormal-activity
+z-score radar against a self-collected rolling baseline, a pump filter, and
+a sink-anticipation watchlist. The z-score screens have a real burn-in
+period (about 90 days) before the baseline is trustworthy; the sink
+watchlist needs no history and is live from day one.</p>
+__RADAR__
 __CONSTITUENTS__
 <div class="notes">
 <ul>

@@ -92,6 +92,33 @@ def diff_queues(prev, cur):
     return events
 
 
+def diff_theses(prev, cur):
+    """Transition events between two thesis-registry snapshots, sibling to
+    diff_queues but firing only on the two edges a human needs to act on:
+    active -> catalyst_passed (decide hold or invalidate) and any bucket ->
+    invalidated (exit decision overdue). Staying in a bucket is silence,
+    same philosophy as diff_queues. Lines are prefixed [THESIS] so they
+    read as a distinct category inside the shared daily comment.
+    """
+    was = {r["key"]: r for r in prev}
+    events = []
+    for r in cur:
+        old = was.get(r["key"])
+        ob = old["bucket"] if old else None
+        b = r["bucket"]
+        if b == "catalyst_passed" and ob == "active":
+            events.append(_ev(
+                "thesis_catalyst", {"id": r["id"], "name": r["name"]},
+                f"[THESIS] CATALYST PASSED: {r['name']}, decide hold or invalidate",
+            ))
+        elif b == "invalidated" and ob != "invalidated":
+            events.append(_ev(
+                "thesis_invalidated", {"id": r["id"], "name": r["name"]},
+                f"[THESIS] INVALIDATION DATE PASSED: {r['name']}, exit decision overdue",
+            ))
+    return events
+
+
 def render_comment(events, generated):
     lines = "\n".join(f"- {e['line']}" for e in events)
     return f"{lines}\n\n[report]({REPORT_URL}) as of {generated}"
@@ -143,6 +170,7 @@ def main():
         print(f"baseline: {len(cur['queue'])} queue rows saved, nothing posted")
     else:
         events = diff_queues(prev["queue"], cur["queue"])
+        events += diff_theses(prev.get("theses", []), cur.get("theses", []))
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     for e in events:
         e["date"] = today
