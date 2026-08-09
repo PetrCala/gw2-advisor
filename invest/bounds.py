@@ -314,6 +314,13 @@ def structural_floor(item_id, row, prices, graph=None):
     distance is 1 - coverage, kept on the dict so both words resolve).
     `row` is a dw2 snapshot row; graph=None skips the conversion leg, which
     is what a caller with no archive parse should pass.
+
+    Both reported forms are clamped into [0, 1] at their own end: coverage
+    below zero is meaningless and distance below zero would render as a
+    negative percentage on the one quantity risk rule 7 names as canonical.
+    An item trading under its vendor buy-back (the scorers.flip data-glitch
+    case) therefore reads as coverage 1-and-over, distance zero, which is
+    "at floor" rather than "protected by 140% of itself".
     """
     floor, source = vendor_floor(row), "vendor"
     if graph:
@@ -327,7 +334,7 @@ def structural_floor(item_id, row, prices, graph=None):
         "floor": floor,
         "source": source,
         "coverage": round(coverage, 4) if coverage is not None else None,
-        "distance": round(1 - coverage, 4) if coverage is not None else None,
+        "distance": max(0.0, round(1 - coverage, 4)) if coverage is not None else None,
     }
 
 

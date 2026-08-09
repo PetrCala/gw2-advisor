@@ -15,11 +15,16 @@ theses, never in accounting); the patient sell-listing mark rides along.
 Stock is broken down by material class (invest.tags) so the report can
 show class exposure against the allocation caps, and each class also
 carries its structural floor (invest.bounds, S7), which is the aggregate
-half of risk rule 7: what share of the liquidation mark is underwritten by
+half of risk rule 7: what share of the price net of tax is underwritten by
 a vendor price or a conversion route rather than by sentiment. That series
 cannot be backfilled - no record of past holdings or past vendor values
 exists - so it is a from-today-forward number, the same honest posture as
 the radar's documented burn-in.
+
+The structural leg is optional and degrades rather than failing: it needs
+one extra dw2 snapshot call, and this series is the one thing in the repo
+that genuinely cannot be recovered later, so a datawars2 timeout must cost
+today's coverage number and never today's point.
 
 The series lives in the private bucket with absolute gold; the public page
 renders it rebased to 100 (report.invest), so wealth stays off the site.
@@ -41,16 +46,34 @@ def build_point(gathered, prices, today, floors=None):
 
     `floors` is {item_id: structural floor per unit in copper}
     (invest.bounds.structural_floor, S7). Given it, the point also carries
-    floor_classes and stock_floor_structural, the aggregate half of risk
-    rule 7: how much of the liquidation mark is structurally underwritten,
-    per class and in total. Left None, the point is byte-identical to every
-    point stored before this milestone, so old series and existing callers
-    keep working untouched.
+    structural_classes, mark_classes, stock_structural and structural_items,
+    the aggregate half of risk rule 7: how much of the price net of tax is
+    structurally underwritten, per class and in total. Left None, the point
+    is byte-identical to every point stored before this milestone, so old
+    series and existing callers keep working untouched.
+
+    Naming, deliberately: `floor`/`stock_floor`/`classes` are the LIQUIDATION
+    totals this series has always carried (a dump into the bid net of fees),
+    and everything with "structural" in its name is S7's bound. The two are
+    never the same quantity, so no key spans both words.
+
+    The structural coverage denominator is `mark_classes`, the ask net of
+    tax, which is what docs/INVESTING.md risk rule 7 and
+    invest.bounds.floor_coverage both measure a floor against. Getting that
+    denominator wrong is not cosmetic: on the wide-spread items S4 targets,
+    bid-net and ask-net differ by the whole spread, and the same position
+    would then read two different coverages on two pages of one site.
+
+    `structural_classes` carries only the classes a floor was actually
+    computable for. A class that is missing is unmeasured, which is a
+    different statement from a floor of zero, and the page renders the two
+    differently.
     """
     classes = dict.fromkeys(tags.CLASSES, 0)
-    floor_classes = dict.fromkeys(tags.CLASSES, 0)
+    mark_classes = dict.fromkeys(tags.CLASSES, 0)
+    structural_classes = {}
     floor = mark = structural = 0
-    unpriced = floor_items = 0
+    unpriced = structural_items = 0
     for item_id, count in gathered["held"].items():
         p = prices.get(item_id)
         if not p:
@@ -58,19 +81,18 @@ def build_point(gathered, prices, today, floors=None):
             continue
         buy, sell = p[0], p[2]
         item_floor = pnl.net_of_fees(buy * count)
+        item_mark = pnl.net_of_fees(sell * count)
         floor += item_floor
-        mark += pnl.net_of_fees(sell * count)
+        mark += item_mark
         cls = tags.classify(item_id, sell)
         classes[cls] += item_floor
+        mark_classes[cls] += item_mark
         if floors:
             per_unit = floors.get(item_id)
             if per_unit:
-                # Compared against the liquidation mark, not the ask: both
-                # sides of the ratio then mean the same thing, "what this
-                # position is worth if it has to leave today".
-                floor_classes[cls] += per_unit * count
+                structural_classes[cls] = structural_classes.get(cls, 0) + per_unit * count
                 structural += per_unit * count
-                floor_items += 1
+                structural_items += 1
     liquid = (
         gathered["coins"] + gathered["delivery_coins"] + gathered["open_buy_capital"]
     )
@@ -87,9 +109,10 @@ def build_point(gathered, prices, today, floors=None):
         "classes": classes,
     }
     if floors is not None:
-        point["floor_classes"] = floor_classes
-        point["stock_floor_structural"] = structural
-        point["floor_items"] = floor_items
+        point["structural_classes"] = structural_classes
+        point["mark_classes"] = mark_classes
+        point["stock_structural"] = structural
+        point["structural_items"] = structural_items
     return point
 
 
@@ -102,16 +125,27 @@ def append(series, point, cap=MAX_POINTS):
 
 
 def _structural_floors(held_ids, prices):
-    """{item_id: floor per unit} for the held ids that have one (S7).
+    """{item_id: floor per unit} for the held ids that have one (S7), or
+    None when the snapshot the floors are read from could not be fetched.
 
     Costs one extra dw2 snapshot request (vendor_value already rides in the
     default fields, no widening needed) and one archive parse; the
     fetch_all_prices call main() already makes supplies the conversion
     leg's price map for free.
+
+    None rather than {} on failure, because the two mean different things
+    downstream: {} is "measured, nothing had a floor" and None is "not
+    measured today", which build_point renders as a legacy point.
     """
     from collector import dw2
 
-    by_id = {it["id"]: it for it in dw2.fetch_snapshot() if it.get("id") is not None}
+    try:
+        snap = dw2.fetch_snapshot()
+    except Exception as e:  # noqa: BLE001 - an optional leg must never cost the point
+        print(f"structural floors skipped: {type(e).__name__}: {e}", file=sys.stderr)
+        return None
+
+    by_id = {it["id"]: it for it in snap if it.get("id") is not None}
     graph = bounds.load_graph()
     out = {}
     for item_id in held_ids:
@@ -154,15 +188,19 @@ def main():
     # gold here, only shape. The report page is where the owner reads value,
     # rebased to 100 (see report.invest).
     mark_premium = point["mark"] / point["floor"] - 1 if point["floor"] else 0.0
-    covered = (
-        point["stock_floor_structural"] / point["stock_floor"]
-        if point["stock_floor"]
-        else 0.0
-    )
+    # "floor" on its own is the word this milestone stopped using: the two
+    # meanings would otherwise sit eight words apart in one public log line.
+    tail = ""
+    if floors is not None:
+        stock_mark = sum(point["mark_classes"].values())
+        covered = point["stock_structural"] / stock_mark if stock_mark else 0.0
+        tail = (
+            f", structural floors cover {covered:.1%} of stock "
+            f"across {point['structural_items']} items"
+        )
     print(
         f"NAV {point['d']}: {point['items']} items ({point['unpriced']} unpriced), "
-        f"mark {mark_premium:+.1%} above floor, structural floor covers "
-        f"{covered:.1%} of stock across {point['floor_items']} items "
+        f"mark {mark_premium:+.1%} above liquidation{tail} "
         f"({len(series['points'])} points) -> s3://{store.bucket}/{NAV_KEY}"
     )
     return 0

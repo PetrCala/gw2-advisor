@@ -43,6 +43,17 @@ where no structural route exists. With no structural ceiling AND no traded
 high, the row is rejected as "no ceiling evidence" rather than scored off
 the ladder's own top. A broken invest.bounds parse therefore produces an
 empty table, never a four-figure plan on an item that trades for a few gold.
+A structural ceiling of zero copper is a BINDING ceiling for the same
+reason, never a missing one: the archive really does hold recipes whose
+whole non-self ingredient list is catalysts, and reading that as absence
+would swap the strictest bound available for the loosest one.
+
+MISSING EVIDENCE IS NOT GOOD NEWS, the same rule applied to the other half
+of the score. An item where the window observed no new listings at all has
+no re-supply rate; flooring the divisor would hand it the maximum race and
+so waive the race half of min(race, mult) exactly where nothing was
+measured. Those rows are rejected, not floored, and land in the near-miss
+list with their reason.
 
 WHAT THIS SCREEN CANNOT SEE. Demand elasticity, first: every plan assumes
 the observed demand survives at the raised price, and it will not. And
@@ -85,12 +96,23 @@ TAX = 0.15  # trading post cut; kept in sync with scorers.flip.TAX by a test
 UNLOAD_SHARE = 0.25
 
 MIN_SELL_PRICE = 10_000  # 1g; below this the copper tick and the 15% cut eat the trade
-MAX_SWALLOW = 3_000_000  # 300g of book, S6's "swallow cost under a few hundred gold"
+# 300g of book, S6's "swallow cost under a few hundred gold". Enforced
+# TWICE, and the second time is the one that binds: stage 1 tests it against
+# the touch, which is a strict lower bound on the real ladder cost, and
+# plan() re-tests the walked cost. A pick needs a ceiling well above spot,
+# which on a thin book means a steep ladder, so the real cost routinely runs
+# several times the touch-priced estimate.
+MAX_SWALLOW = 3_000_000
 MIN_SALES_1M = 20  # evidence floor: under ~20 sales/month the demand rate is not an estimate
 MAX_EXIT_DAYS = 90  # docs/INVESTING.md risk rule 2's vault/corner exit horizon
 UNIVERSE_CAP = 200  # exactly one gw2api.fetch_listings page (invest.luxury.MAX_UNIVERSE's reasoning)
 REFILL_FLOOR = 1 / 30  # "fewer than one unit a month", the smallest the window could observe
-RACE_CAP = 10.0  # a race with no observed refill ranks well, never infinitely well
+RACE_CAP = 10.0  # a very thin measured refill ranks well, never infinitely well
+# The buy book has to absorb at least this share of the lot before a
+# bail-out percentage means anything. Below it the visible depth is a
+# rounding error against the lot and the number would describe a trade
+# nobody can make.
+BAIL_MIN_COVERAGE = 0.25
 # A relist may not exceed the 12-month traded high. Hardcoded at 1.0 on
 # purpose: it is the one knob that manufactures picks (a live run produced 1
 # scored pick at 1.0, and all 200 candidates passing at 2.0). Any premium
@@ -143,16 +165,19 @@ def demand(it):
 def refill(it):
     """Units/day of new sell listings: the flow racing our unload.
 
-    Floored at REFILL_FLOOR rather than left at zero. A measured zero is
-    real (about 1 in 200 of the live universe) but it is an observation
-    limit, not a fact about the market, and dividing by it would rank an
-    item top for having no sample at all.
+    Floored at REFILL_FLOOR so a rate rounded down out of two integer
+    counters cannot divide the race into the sky. It is a guard on thin
+    arithmetic, not a stand-in for missing evidence: a row that observed no
+    listings at all is rejected by plan() rather than floored, because the
+    floor would hand it the maximum race and waive the whole race half of
+    the score for exactly the rows with nothing behind it.
     """
     return max(_blend(it.get("7d_sell_listed"), it.get("1m_sell_listed")), REFILL_FLOOR)
 
 
 def refill_unobserved(it):
-    """True when the window saw no new listings at all, so refill() is a floor."""
+    """True when the window saw no new listings at all, so there is no
+    re-supply rate to race against and plan() refuses to score the row."""
     return _blend(it.get("7d_sell_listed"), it.get("1m_sell_listed")) <= 0
 
 
@@ -230,11 +255,16 @@ def unload_schedule(qty, demand_per_day, relist_at):
 
     per_day is UNLOAD_SHARE of the item's own demand, the same
     capture-share-of-flow convention as season.actions.suggested_qty, then
-    ceiled into weekly tranches. abort_qty is one week of our own planned
-    sales: that much new supply resting under our relist means the moat is
-    gone and the remainder gets dumped. It is checkable daily against the
-    next day's stored ladder with features.book.queue_ahead, so the tripwire
-    has data behind it rather than being advice.
+    ceiled into weekly tranches.
+
+    abort_qty is one week of our own planned sales, and it is a threshold on
+    a NET quantity, not on a cumulative one: report.track.tick_corner trips
+    it when re-supply since open exceeds our own sales since open by this
+    much. Compared against gross re-supply instead it would fire purely as a
+    function of elapsed time (any refill rate reaches any stock eventually),
+    so a pick would abort on the calendar rather than on the moat breaking.
+    Net, it fires exactly when new listings are outrunning our unload, which
+    is what "the moat is gone" means.
     """
     per_day = UNLOAD_SHARE * demand_per_day
     if per_day <= 0 or qty <= 0:
@@ -256,23 +286,43 @@ def unload_schedule(qty, demand_per_day, relist_at):
     }
 
 
-def bail_out_pct(buys, qty, avg_cost):
-    """Per-unit loss from dumping the whole lot into today's buy book.
+def bail_out(buys, qty, avg_cost):
+    """(per-unit loss from dumping into today's buy book, share of the lot
+    that book can actually absorb).
 
-    Identical definition to season.actions.exit_pct, re-derived here so this
-    module never reaches invest.bankroll, not even transitively (see the
-    privacy note in the module docstring). Shown as a bail-out estimate and
-    deliberately NOT a gate, and bounded_qty is deliberately not applied: a
-    thin buy book is precisely what makes a corner possible, so gating on it
-    would reject every genuine candidate. It is an estimate, never a floor:
-    the 2021 mystic coin wall dropped 22% overnight when its owner was
-    banned (docs/RESEARCH.md), which is what reading buy-side depth as
-    guaranteed liquidity costs.
+    Definition of the loss itself is season.actions.exit_pct's, re-derived
+    here so this module never reaches invest.bankroll, not even transitively
+    (see the privacy note in the module docstring). Shown as a bail-out
+    estimate and deliberately NOT a gate, and bounded_qty is deliberately
+    not applied: a thin buy book is precisely what makes a corner possible,
+    so gating on it would reject every genuine candidate.
+
+    Only the units the visible book really covers are valued.
+    features.book.dump_value values everything past the deepest visible bid
+    AT that bid, which is fine for its own callers and catastrophic here:
+    corner candidates are selected for thin books, so the lot routinely
+    exceeds total bid depth by two orders of magnitude, and one lucky unit
+    resting above cost would otherwise print a POSITIVE bail-out for a lot
+    the buy side cannot absorb at all. Under BAIL_MIN_COVERAGE of the lot no
+    percentage is returned at all, only the coverage, so the page can say
+    the book cannot cover it rather than quote a friendly number.
+
+    It is an estimate, never a floor, even at full coverage: the 2021 mystic
+    coin wall dropped 22% overnight when its owner was banned
+    (docs/RESEARCH.md), which is what reading buy-side depth as guaranteed
+    liquidity costs.
     """
     if not buys or not qty or not avg_cost:
-        return None
-    net = book.dump_value(buys, qty) * (1 - TAX)
-    return round((net / qty - avg_cost) / avg_cost, 3)
+        return None, None
+    depth = sum(q for _, q in buys if q)
+    covered = min(qty, depth)
+    if covered <= 0:
+        return None, 0.0
+    coverage = round(covered / qty, 3)
+    if covered / qty < BAIL_MIN_COVERAGE:
+        return None, coverage
+    net = book.dump_value(buys, covered) * (1 - TAX)
+    return round((net / covered - avg_cost) / avg_cost, 3), coverage
 
 
 def _reject(it, reason):
@@ -294,24 +344,54 @@ def plan(it, item_book, ceiling_copper, ceiling_source):
     sell = it.get("sell_price") or 0
     high12 = it.get("12m_sell_price_max") or 0
     empirical = int(high12 * CEILING_PREMIUM) if high12 else None
-    if ceiling_copper is None and not empirical:
-        return _reject(it, "no ceiling evidence")
-
-    options = [c for c in (ceiling_copper, empirical) if c]
+    # `is not None`, not truthiness. A structural ceiling of ZERO is the
+    # strictest bound there is ("the alternative route costs nothing we can
+    # price"), and 24 real archive recipes produce one, every ingredient
+    # being a catalyst. Dropping it as falsy would silently promote the
+    # LOOSER traded high in its place, which inverts the whole fail-closed
+    # design: the one number that caps the relist would be replaced by a
+    # weaker one exactly where the structural evidence is strongest.
+    options = [c for c in (ceiling_copper, empirical) if c is not None]
     if not options:
         return _reject(it, "no ceiling evidence")
     cap = min(options)
     # Which bound actually binds is what the reader needs to know: a
     # structural moat survives a patch differently from a historical one.
-    source = ceiling_source if (ceiling_copper and cap == ceiling_copper) else "traded high"
+    source = (
+        ceiling_source
+        if (ceiling_copper is not None and cap == ceiling_copper)
+        else "traded high"
+    )
     if cap <= sell:
         return _reject(it, "already above the alternative route")
+
+    d = demand(it)
+    if d <= 0:
+        # Unreachable through main() (is_candidate filters it first) and
+        # guarded anyway: plan() is a public entry point, and the promise in
+        # the docstring above is that no degenerate input leaves through
+        # anything but the reason branch.
+        return _reject(it, "no measurable demand")
+    if refill_unobserved(it):
+        # No listings observed in the whole window means there is no
+        # re-supply rate, not a tiny one. Scoring it would floor the divisor
+        # and hand the row the maximum race, waiving the race half of the
+        # score and its MIN_SCORE gate for precisely the rows with no
+        # evidence behind them, which would then outrank measured ones.
+        return _reject(it, "no observed re-supply to race against")
 
     levels = (item_book or {}).get("sells") or []
     break_even = cap * (1 - TAX)
     qty, cost = walk(levels, break_even)
     if qty <= 0:
         return _reject(it, "already at the ceiling")
+    if cost > MAX_SWALLOW:
+        # Stage 1 bounded this at the touch; here it is the real ladder.
+        return _reject(
+            it,
+            f"swallow cost {cost / 10_000:,.0f}g over the "
+            f"{MAX_SWALLOW / 10_000:,.0f}g cap",
+        )
 
     avg = cost / qty
     relist = _relist_at(levels, break_even, cap)
@@ -319,7 +399,6 @@ def plan(it, item_book, ceiling_copper, ceiling_source):
     if margin <= 0:
         return _reject(it, "no room under the ceiling")
 
-    d = demand(it)
     unload_days = qty / (UNLOAD_SHARE * d)
     if unload_days > MAX_EXIT_DAYS:
         # Not sized down. Every other strategy shrinks a lot the book cannot
@@ -341,6 +420,8 @@ def plan(it, item_book, ceiling_copper, ceiling_source):
     if score < MIN_SCORE:
         return _reject(it, f"score {score:.2f} under the {MIN_SCORE:.2f} minimum")
 
+    unload = unload_schedule(qty, d, int(relist))
+    bail_pct, bail_coverage = bail_out((item_book or {}).get("buys"), qty, avg)
     return {
         "id": it["id"],
         "name": it.get("name") or f"item {it['id']}",
@@ -357,12 +438,12 @@ def plan(it, item_book, ceiling_copper, ceiling_source):
         "mult": round(mult, 3),
         "demand_per_day": round(d, 2),
         "refill_per_day": round(refill(it), 3),
-        "refill_unobserved": refill_unobserved(it),
         "race": round(race, 3),
         "score": round(score, 3),
         "unload_days": round(unload_days, 1),
-        "bail_out_pct": bail_out_pct((item_book or {}).get("buys"), qty, avg),
-        "unload": unload_schedule(qty, d, int(relist)),
+        "bail_out_pct": bail_pct,
+        "bail_out_coverage": bail_coverage,
+        "unload": unload,
     }
 
 

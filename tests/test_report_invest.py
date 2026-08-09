@@ -15,10 +15,14 @@ def nav_series(floors=False):
         }
         if floors:
             stock = floor - floor // 2
-            p["floor_classes"] = {"t6": stock // 4, "festival": 0, "staples": 0,
-                                  "luxury": 0, "other": 0}
-            p["stock_floor_structural"] = stock // 4
-            p["floor_items"] = 6
+            # The coverage denominator is the ask net of tax, so the mark
+            # buckets are what a class coverage divides by, never classes[].
+            p["mark_classes"] = {"t6": stock * 2, "festival": 0, "staples": 0,
+                                 "luxury": 0, "other": 0}
+            # Only measured classes appear: t6 has a floor, the rest do not.
+            p["structural_classes"] = {"t6": stock // 2}
+            p["stock_structural"] = stock // 2
+            p["structural_items"] = 6
         return p
 
     return {"points": [point("2026-08-01", 1_000_000), point("2026-08-08", 1_100_000)]}
@@ -113,7 +117,7 @@ def test_nav_public_carries_no_absolute_gold():
     # value is a date, a rebased level, a count or a ratio. Nothing on this
     # page may carry copper.
     for key in ("floor", "mark", "liquid", "stock_floor", "classes",
-                "floor_classes", "stock_floor_structural"):
+                "structural_classes", "mark_classes", "stock_structural"):
         assert key not in pub
     assert pub["floor_coverage"] == 0.25
     assert pub["floor_items"] == 6
@@ -133,6 +137,21 @@ def test_exposure_rows_render_floor_coverage_as_a_ratio_never_a_gold_level():
     assert all(abs(r["floor_coverage"] or 0) <= 1 for r in rows)
 
 
+def test_class_coverage_divides_by_the_ask_net_of_tax_not_the_liquidation_value():
+    # The two denominators differ by the whole spread on exactly the
+    # wide-spread items S4 targets, and report.track's per-position Floor
+    # column uses the ask net of tax, so this page has to as well or one
+    # position reads two coverages on two pages of one site.
+    nav = nav_series(floors=True)
+    latest = nav["points"][-1]
+    rows = invest.exposure_rows(nav, bankroll_copper=None)
+    t6 = next(r for r in rows if r["cls"] == "t6")
+    assert t6["floor_coverage"] == round(
+        latest["structural_classes"]["t6"] / latest["mark_classes"]["t6"], 4
+    )
+    assert latest["mark_classes"]["t6"] != latest["classes"]["t6"]
+
+
 def test_exposure_rows_leave_floor_coverage_none_without_the_new_keys():
     rows = invest.exposure_rows(nav_series(), bankroll_copper=None)
     assert all(r["floor_coverage"] is None for r in rows)
@@ -144,7 +163,7 @@ def test_exposure_table_renders_coverage_and_the_liquidation_mark_wording():
     assert "Floor coverage" in html
     assert "25.0%" in html
     assert "n/a" in html  # a class with no computable floor
-    assert "above the liquidation mark" in html
+    assert "above liquidation" in html
     assert "above the floor" not in html
 
 
@@ -391,9 +410,11 @@ def corner_doc(picks=None, rejected=None):
                 "cost": 750_000, "avg_cost": 25_000, "relist_at": 59_999,
                 "ceiling": 60_000, "ceiling_source": "traded high",
                 "margin": 25_999, "mult": 2.04, "demand_per_day": 10.0,
-                "refill_per_day": 1.0, "refill_unobserved": False,
+                "refill_per_day": 1.0,
                 "race": 2.5, "score": 2.04, "unload_days": 12.0,
-                "bail_out_pct": -0.28, "unload": {"days": 12},
+                "bail_out_pct": -0.28, "bail_out_coverage": 1.0,
+                "unload": {"qty": 30, "per_day": 2.5, "days": 12,
+                           "abort_qty": 18, "horizon_days": 90},
             }
         ],
         "rejected": rejected if rejected is not None else [
@@ -408,8 +429,33 @@ def test_corner_table_shows_the_pick_and_its_bounding_columns():
     assert "Corner Item" in html
     assert "traded high" in html
     assert "2.04" in html
-    assert "12d" in html
     assert "per-corner cap" in html  # no bankroll figure, just the reminder
+
+
+def test_corner_table_puts_the_whole_exit_on_the_row_that_moves_gold():
+    # S6 calls the exit the binding constraint and requires it designed
+    # before the first buy, so lot size, the weekly rate and the abort
+    # tripwire belong on the decision table, not only in the paper record.
+    html = invest.corner_table(
+        invest.build_payload(None, None, None, corner_doc=corner_doc())
+    )
+    for cell in ("<td>30</td>", "12d at 18/wk", "18 new"):
+        assert cell in html
+    for head in ("<th>Lot</th>", "<th>Unload</th>", "<th>Abort at</th>"):
+        assert head in html
+
+
+def test_bail_out_cell_never_quotes_a_percentage_the_book_cannot_cover():
+    # invest.corner.bail_out returns no percentage under its coverage
+    # minimum; the cell has to say so rather than leave the column blank.
+    assert invest.bail_cell({"bail_out_pct": -0.28, "bail_out_coverage": 1.0}) == "-28.0%"
+    assert invest.bail_cell(
+        {"bail_out_pct": -0.28, "bail_out_coverage": 0.4}
+    ) == "-28.0% on 40% of lot"
+    assert invest.bail_cell(
+        {"bail_out_pct": None, "bail_out_coverage": 0.01}
+    ) == "not coverable (1% of lot)"
+    assert invest.bail_cell({"bail_out_pct": None, "bail_out_coverage": None}) == "no buy book"
 
 
 def test_corner_table_always_lists_the_near_misses_with_their_reasons():

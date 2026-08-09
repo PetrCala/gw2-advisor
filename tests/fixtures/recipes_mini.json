@@ -124,5 +124,50 @@
     "ingredients": [
       {"item_id": 2004, "count": 1}
     ]
+  },
+  {
+    "id": "-12",
+    "name": "Two Routes: expensive, listed first",
+    "output_item_id": 1012,
+    "output_item_count": 1,
+    "output_item_count_range": "",
+    "disciplines": ["Merchant"],
+    "ingredients": [
+      {"item_id": 2003, "count": 1}
+    ]
+  },
+  {
+    "id": "-13",
+    "name": "Two Routes: cheap, listed second",
+    "output_item_id": 1012,
+    "output_item_count": 2,
+    "output_item_count_range": "",
+    "disciplines": ["Mystic Forge"],
+    "ingredients": [
+      {"item_id": 2002, "count": 1},
+      {"item_id": 2004, "count": 2}
+    ]
+  },
+  {
+    "id": "-14",
+    "name": "Two Consumers: worse, listed first",
+    "output_item_id": 1013,
+    "output_item_count": 1,
+    "output_item_count_range": "",
+    "disciplines": ["Merchant"],
+    "ingredients": [
+      {"item_id": 2005, "count": 2}
+    ]
+  },
+  {
+    "id": "-15",
+    "name": "Two Consumers: better, listed second",
+    "output_item_id": 1014,
+    "output_item_count": 1,
+    "output_item_count_range": "",
+    "disciplines": ["Mystic Forge"],
+    "ingredients": [
+      {"item_id": 2005, "count": 1}
+    ]
   }
 ]

@@ -31,8 +31,8 @@ The simulation, stated plainly:
 - A corner pick (docs/INVESTING.md, S6) fills its whole lot at open at the
   ladder VWAP the screen computed, then the exit is simulated day by day:
   we sell our planned share of demand on days nobody has undercut our
-  relist, and abort once accumulated new listings pass the schedule's
-  tripwire. The entry is not simulated because a sweep is one instant
+  relist, and abort once new listings have outrun our own sales by the
+  schedule's tripwire. The entry is not simulated because a sweep is one instant
   action against a book that was really observed, and the daily snapshot
   carries no ladder to model it against.
 
@@ -350,10 +350,18 @@ def tick_corner(pos, row, today):
     On a day the best ask is at or above our relist, nobody has undercut us,
     so we sell our own planned share of that day's demand at the relist net
     of tax. On a day it is below, we sell nothing and the day is counted as
-    undercut. New sell listings accumulate as re-supply; once they pass the
-    schedule's abort tripwire with units still unsold, the moat is gone and
-    the remainder is dumped. That is the 2016 ToT-bag festival re-supply and
-    the 2016-17 leather-farm patch, measured rather than described.
+    undercut.
+
+    The abort tripwire compares re-supply since open against OUR OWN SALES
+    since open, and fires when new listings have outrun us by one week of
+    the planned schedule. Comparing the cumulative re-supply flow against
+    that same one-week stock instead would make the tripwire a clock: any
+    refill rate reaches any fixed quantity eventually, so a position would
+    abort on day 28 of a 90-day plan purely from elapsed time, and the
+    "resupplied" bucket that is meant to be S6's scoreboard would be partly
+    measuring the calendar. Net, it fires when the moat is actually
+    breaking, which is the 2016 ToT-bag festival re-supply and the 2016-17
+    leather-farm patch.
     """
     bid, ask = row.get("buy_price"), row.get("sell_price")
     pos["days"] += 1
@@ -373,8 +381,18 @@ def tick_corner(pos, row, today):
         pos["revenue"] += units * pos["relist_at"] * (1 - TAX)
     elif ask:
         pos["undercut_days"] += 1
-    if pos["abort_qty"] and pos["resupply"] >= pos["abort_qty"] and pos["qty"] - pos["sold"] > EPS:
+    if (
+        pos["abort_qty"]
+        and net_resupply(pos) >= pos["abort_qty"]
+        and pos["qty"] - pos["sold"] > EPS
+    ):
         pos["aborted"] = True
+
+
+def net_resupply(pos):
+    """New listings since open minus our own sales since open, floored at
+    zero: how far the book has refilled past what we cleared out of it."""
+    return max(0.0, pos["resupply"] - pos["sold"])
 
 
 def tick_flip(pos, row, today):
@@ -794,6 +812,7 @@ def close_corner(pos, today):
         "undercut_days": pos["undercut_days"],
         "planned_days": pos["planned_days"],
         "resupply": round(pos["resupply"], 1),
+        "net_resupply": round(net_resupply(pos), 1),
         "abort_qty": pos["abort_qty"],
         "ceiling_source": pos["ceiling_source"],
         "spent": round(pos["spent"], 1),
@@ -1137,7 +1156,7 @@ def flip_rows(records):
     return out
 
 
-def _floor_flag(item_id, by_id, graph=None, prices=None):
+def _floor_flag(item_id, by_id):
     """"62% vendor" / "at floor vendor" for a position sitting near a
     computable structural floor (docs/INVESTING.md risk rule 7, S7), or ""
     when there is no item id, no snapshot row for it, or no floor at all.
@@ -1146,17 +1165,18 @@ def _floor_flag(item_id, by_id, graph=None, prices=None):
     _launch_flag below, so SCHEMA stays put and no stored position is
     invalidated by this column arriving.
 
-    Only the vendor leg is wired here: it is free (vendor_value already
-    rides in the default snapshot fields), while the conversion leg needs a
-    price map this module does not fetch. graph/prices are accepted so a
-    caller that has both can pass them without another signature change.
+    Only the vendor leg is wired: it is free (vendor_value already rides in
+    the default snapshot fields), while the conversion leg needs a price map
+    this module does not fetch. No graph/prices parameters are carried for a
+    caller that might one day have both, because an accepted-but-never-passed
+    parameter reads as covered when it is not.
     """
     if item_id is None or not by_id:
         return ""
     row = by_id.get(item_id)
     if not row:
         return ""
-    out = bounds.structural_floor(item_id, row, prices or {}, graph)
+    out = bounds.structural_floor(item_id, row, {}, None)
     coverage, source = out["coverage"], out["source"]
     if coverage is None:
         return ""
@@ -1432,7 +1452,7 @@ def corner_open_rows(positions, today, by_id=None):
                 escape(p["ceiling_source"]),
                 f"{p['held_top_days']} / {p['days']}",
                 f"{p['undercut_days']}",
-                f"{p['resupply']:,.0f} / {p['abort_qty']:,}",
+                f"{net_resupply(p):,.0f} / {p['abort_qty']:,}",
                 planned,
                 _launch_flag(p["id"], today),
                 _floor_flag(p["id"], by_id),
@@ -1454,7 +1474,7 @@ def corner_rows(records):
                 f'<span class="o-{r["outcome"]}">{r["outcome"]}</span>',
                 f"{r['sold']:,.0f} / {r['qty']:,}",
                 f"{r['held_top_days']} / {r['days']}",
-                f"{r['resupply']:,.0f} / {r['abort_qty']:,}",
+                f"{r['net_resupply']:,.0f} / {r['abort_qty']:,}",
                 money(r["net"]),
                 money(r["pred_net"]),
                 pct(r["net_pct"]),
@@ -1630,14 +1650,14 @@ def render(state, summary, generated, by_id=None):
     else:
         khead = (
             "No corner has resolved yet; one resolves when the lot is gone, "
-            "when new listings pass the abort tripwire, or after "
+            "when new listings outrun our sales past the abort tripwire, or after "
             f"{CORNER_HORIZON_DAYS} days, whichever comes first."
         )
     html = html.replace("__CORNER_META__", khead)
     corner_open = _table(
         [
             "Item", "Opened", "Sold", "Avg cost", "Relist", "Ceiling from",
-            "Top d", "Undercut d", "Resupply", "Planned", "Launch risk", "Floor",
+            "Top d", "Undercut d", "Net resupply", "Planned", "Launch risk", "Floor",
         ],
         corner_open_rows(state["positions"], today, by_id),
     )
@@ -1645,7 +1665,7 @@ def render(state, summary, generated, by_id=None):
         "__CORNER_OPEN__", corner_open or "<p>No corner is open right now.</p>"
     )
     corner_closed = _table(
-        ["Item", "Opened", "Closed", "Outcome", "Sold", "Top d", "Resupply",
+        ["Item", "Opened", "Closed", "Outcome", "Sold", "Top d", "Net resupply",
          "Net", "Predicted net", "Realized"],
         corner_rows(state["records"]),
     )
@@ -1894,9 +1914,12 @@ fake precision to the leg that is not in doubt. The exit is where the
 fidelity belongs. On a day the best ask still sits at or above our relist
 nobody has undercut us, so we sell our own planned share of that day's
 demand; on a day it sits below we sell nothing and the day counts as
-undercut. New sell listings accumulate as re-supply, and once they pass the
-schedule's abort tripwire with units unsold, the moat is gone and the
-remainder is dumped at the bid.</p>
+undercut. New sell listings accumulate as re-supply, and once they have
+outrun our own sales by one week of the planned schedule, with units still
+unsold, the moat is gone and the remainder is dumped at the bid. Net of our
+sales on purpose: measured gross, the tripwire would be a clock, since any
+refill rate reaches a fixed quantity eventually and a position would abort
+on elapsed time rather than on the moat breaking.</p>
 <p>The honest limitation: the tracker ticks against a market where we did
 not actually buy, so the book we "removed" is still sitting there in the
 data. Measuring re-supply as accumulated new listings rather than as
