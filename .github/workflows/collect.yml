@@ -1,8 +1,12 @@
 name: collect
 
+# The cron does not set the sampling rate, collector/poll.py does: GitHub
+# delivered only 1.2 of the 6 hourly fires that "*/10" asked for. Each fire
+# starts a job that polls every 10 minutes for 50, and the concurrency group
+# below makes a later fire queue and take over when this one ends.
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -15,7 +19,7 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 9
+    timeout-minutes: 55  # poll.py stops itself at 50; this is the backstop
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -28,6 +32,7 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
-      - run: python -m collector.collect
+      - run: python -m collector.poll
         env:
           S3_BUCKET: ${{ vars.S3_BUCKET }}
+          PYTHONUNBUFFERED: "1"  # otherwise a 50-minute job's log arrives all at once at the end

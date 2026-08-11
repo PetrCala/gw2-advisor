@@ -15,7 +15,15 @@ Repo, scaffold, roadmap, issues, and the gw2profits.com data archive (site shut 
 
 ### M1: collector + storage (done)
 
-Poll `/v2/commerce/prices` for all tradable items (~27k, 135 paginated requests at 200/page, well under the 300 req/min limit) on a cron workflow every ~10 min.
+Poll `/v2/commerce/prices` for all tradable items (~27k, 135 paginated requests at 200/page, well under the 300 req/min limit) every ~10 min.
+
+The cadence comes from `collector/poll.py`, not from cron. GitHub delivered
+1.2 of the 6 hourly fires that `*/10` asked for (median gap 44 min, never
+under 15 across the first 134 runs), and `features/reprice.py` needs the
+1-2c steps that hourly sampling collapses into single large moves. So each
+delivered fire starts a job that polls for 50 minutes, held inside the hour
+the OIDC session is good for, with a concurrency group so a later fire waits
+and takes over rather than overlapping.
 
 GitHub Actions specifics to handle:
 
