@@ -24,6 +24,16 @@ USER_AGENT = "gw2-advisor (github.com/PetrCala/gw2-advisor)"
 TRANSIENT_STATUS = (403, 429, 500, 502, 503, 504)
 
 
+class TransientError(requests.RequestException):
+    """Upstream refused us or went unreachable in a way that clears on its own.
+
+    Kept distinct from a genuine 4xx so a caller can decide that skipping the
+    work is better than failing at it. collector.collect does exactly that
+    while its stored snapshot is still fresh; everything else lets it
+    propagate, which is the same failure they got before this existed.
+    """
+
+
 def _session(session=None):
     if session is not None:
         return session
@@ -100,17 +110,30 @@ def fetch_listings(item_ids, session=None):
 
 
 def _get_json(s, url, params=None):
+    last = "no attempt made"
     for attempt in range(1, RETRIES + 1):
         try:
             resp = s.get(url, params=params, timeout=30)
-        except requests.RequestException:
-            if attempt == RETRIES:
-                raise
+        except requests.RequestException as e:
+            last = f"{type(e).__name__}: {e}"
+        else:
+            if resp.status_code not in TRANSIENT_STATUS:
+                resp.raise_for_status()
+                return resp.json()
+            last = f"HTTP {resp.status_code}, body {_body(resp)}"
+        if attempt < RETRIES:
             time.sleep(BACKOFF * attempt)
-            continue
-        if resp.status_code in TRANSIENT_STATUS and attempt < RETRIES:
-            time.sleep(BACKOFF * attempt)
-            continue
-        resp.raise_for_status()
-        return resp.json()
-    raise RuntimeError(f"no response after {RETRIES} attempts: {url}")
+    raise TransientError(f"{url} unavailable after {RETRIES} attempts, last: {last}")
+
+
+def _body(resp):
+    """A one-line excerpt of a failed response, so the logs say who refused us.
+
+    A 403 from the edge and a 403 from the API itself look identical in a
+    status line and want different fixes; the body distinguishes them.
+    """
+    try:
+        text = " ".join(resp.text.split())
+    except Exception:  # a body we cannot even decode is still worth reporting
+        return "<unreadable>"
+    return text[:200] if text else "<empty>"

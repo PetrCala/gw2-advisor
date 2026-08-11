@@ -5,8 +5,9 @@ from collector import gw2api
 
 
 class _Resp:
-    def __init__(self, status, payload=None):
+    def __init__(self, status, payload=None, text=""):
         self.status_code = status
+        self.text = text
         self._payload = payload
 
     def json(self):
@@ -46,9 +47,32 @@ def test_rate_limit_is_retried():
     assert len(s.calls) == 2
 
 
-def test_persistent_403_still_raises():
+def test_persistent_403_raises_transient():
     s = _Session(*[_Resp(403) for _ in range(gw2api.RETRIES)])
-    with pytest.raises(requests.HTTPError):
+    with pytest.raises(gw2api.TransientError):
+        gw2api._get_json(s, gw2api.PRICES_URL)
+    assert len(s.calls) == gw2api.RETRIES
+
+
+def test_transient_error_reports_the_response_body():
+    s = _Session(*[_Resp(403, text="<html> denied by edge </html>") for _ in range(gw2api.RETRIES)])
+    with pytest.raises(gw2api.TransientError, match="denied by edge"):
+        gw2api._get_json(s, gw2api.PRICES_URL)
+
+
+def test_transient_error_is_a_request_exception():
+    # callers that already catch RequestException keep behaving as they did
+    assert issubclass(gw2api.TransientError, requests.RequestException)
+
+
+def test_persistent_connection_error_raises_transient():
+    class _Dead(_Session):
+        def get(self, url, params=None, timeout=None):
+            self.calls.append((url, params))
+            raise requests.ConnectionError("reset")
+
+    s = _Dead()
+    with pytest.raises(gw2api.TransientError, match="ConnectionError"):
         gw2api._get_json(s, gw2api.PRICES_URL)
     assert len(s.calls) == gw2api.RETRIES
 
