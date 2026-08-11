@@ -118,8 +118,25 @@ def test_deadline_shorter_than_the_interval_still_polls_once():
     assert polls == 1
 
 
-def test_defaults_stay_inside_the_oidc_credential_hour():
-    # STS caps the session at an hour while the role has no MaxSessionDuration,
-    # so a job outliving that would fail every write past the first hour
-    assert poll.DEADLINE < 3600
-    assert poll.INTERVAL == 600
+def test_defaults_fit_six_polls_inside_the_oidc_credential_hour():
+    """The first live job polled 5 times, not 6.
+
+    A 50-minute budget refuses the poll starting at exactly 50 minutes,
+    because a poll landing on the deadline does not run, so a sixth was
+    dropped every job. STS caps the session at an hour while the role has no
+    MaxSessionDuration, so the budget still has to leave real margin.
+    """
+    clock = _Clock()
+    starts = []
+
+    def collect():
+        starts.append(clock.now)
+        clock.spend(45)  # what a real collect run costs
+
+    polls, _ = poll.run(
+        collect=collect, sleep=clock.sleep, clock=clock,
+        interval=poll.INTERVAL, deadline=poll.DEADLINE,
+    )
+    assert polls == 6
+    assert starts == [0, 600, 1200, 1800, 2400, 3000]
+    assert 3600 - clock.now >= 8 * 60  # job done with margin before the session expires

@@ -27,7 +27,10 @@ import time
 from .collect import main as collect_once
 
 INTERVAL = int(os.environ.get("POLL_INTERVAL_SECONDS", "600"))
-DEADLINE = int(os.environ.get("POLL_DEADLINE_SECONDS", str(50 * 60)))
+# 51 rather than 50 so the sixth poll, which starts at exactly 50 minutes,
+# is inside the budget: a poll landing on the deadline does not run. The job
+# ends around 50m45s, leaving ~9 minutes before STS expires the session.
+DEADLINE = int(os.environ.get("POLL_DEADLINE_SECONDS", str(51 * 60)))
 MAX_CONSECUTIVE_FAILURES = 3
 
 

@@ -21,7 +21,7 @@ The cadence comes from `collector/poll.py`, not from cron. GitHub delivered
 1.2 of the 6 hourly fires that `*/10` asked for (median gap 44 min, never
 under 15 across the first 134 runs), and `features/reprice.py` needs the
 1-2c steps that hourly sampling collapses into single large moves. So each
-delivered fire starts a job that polls for 50 minutes, held inside the hour
+delivered fire starts a job that polls six times over 50 minutes, held inside the hour
 the OIDC session is good for, with a concurrency group so a later fire waits
 and takes over rather than overlapping.
 
